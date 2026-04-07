@@ -1,0 +1,47 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model document_chunks {
+  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  file_id        String                 @db.Uuid
+  chunk_text     String
+  embedding      Unsupported("vector(1024)")?
+  chunk_order    Int?
+  metadata       Json?
+  created_at     DateTime?              @default(now()) @db.Timestamp(6)
+  uploaded_files uploaded_files         @relation(fields: [file_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([embedding], map: "idx_document_chunks_embedding_ivfflat")
+  @@index([file_id], map: "idx_document_chunks_file_id")
+}
+
+model knowledge_base {
+  id             Int              @id @default(autoincrement())
+  name           String           @db.VarChar(255)
+  description    String?
+  created_at     DateTime?        @default(now()) @db.Timestamp(6)
+  updated_at     DateTime?        @default(now()) @db.Timestamp(6)
+  uploaded_files uploaded_files[]
+}
+
+model uploaded_files {
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  knowledge_base_id Int
+  filename          String            @db.VarChar(500)
+  original_path     String?
+  file_size         BigInt?
+  upload_time       DateTime?         @default(now()) @db.Timestamp(6)
+  content           String?
+  status            String?           @default("uploaded") @db.VarChar(50)
+  metadata          Json?
+  document_chunks   document_chunks[]
+  knowledge_base    knowledge_base    @relation(fields: [knowledge_base_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([knowledge_base_id], map: "idx_uploaded_files_kbid")
+}
