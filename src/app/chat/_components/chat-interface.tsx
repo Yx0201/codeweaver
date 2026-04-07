@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   MessageActions,
   MessageAction,
@@ -60,7 +60,9 @@ export function ChatInterface({
   const [selectedKbId, setSelectedKbId] = useState<string>("");
   // ref to track the current conversationId without causing re-renders
   const conversationIdRef = useRef(conversationId);
-  conversationIdRef.current = conversationId;
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
 
   const kbId =
     selectedKbId && selectedKbId !== "none"
