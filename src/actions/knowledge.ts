@@ -73,6 +73,37 @@ export async function createKnowledgeBase(data: {
   }
 }
 
+export async function deleteKnowledgeBaseAction(
+  _prevState: { error?: string; success?: boolean },
+  formData: FormData
+): Promise<{ error?: string; success?: boolean }> {
+  const id = parseInt(formData.get("id") as string);
+  if (isNaN(id)) return { error: "无效的知识库 ID" };
+  try {
+    await prisma.knowledge_base.delete({ where: { id } });
+    revalidatePath("/knowledge");
+    return { success: true };
+  } catch {
+    return { error: "删除失败，请重试" };
+  }
+}
+
+export async function deleteFileAction(
+  _prevState: { error?: string; success?: boolean },
+  formData: FormData
+): Promise<{ error?: string; success?: boolean }> {
+  const id = formData.get("id") as string;
+  const knowledgeBaseId = parseInt(formData.get("knowledgeBaseId") as string);
+  if (!id) return { error: "无效的文件 ID" };
+  try {
+    await prisma.uploaded_files.delete({ where: { id } });
+    revalidatePath(`/knowledge/${knowledgeBaseId}`);
+    return { success: true };
+  } catch {
+    return { error: "删除失败，请重试" };
+  }
+}
+
 export async function getKnowledgeBaseFiles(knowledgeBaseId: number) {
   try {
     if (isNaN(knowledgeBaseId)) {

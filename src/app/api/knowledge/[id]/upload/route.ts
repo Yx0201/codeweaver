@@ -31,7 +31,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "未上传文件" }, { status: 400 });
   }
 
-  const content = await file.text();
+  const arrayBuffer = await file.arrayBuffer();
+  const fileData = Buffer.from(arrayBuffer);
+  const content = fileData.toString("utf-8");
+
   if (!content.trim()) {
     return NextResponse.json({ error: "文件内容为空" }, { status: 400 });
   }
@@ -42,6 +45,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       knowledge_base_id: knowledgeBaseId,
       filename: file.name,
       file_size: BigInt(file.size),
+      mime_type: file.type || "application/octet-stream",
+      file_data: fileData,
       content,
       status: "processing",
     },

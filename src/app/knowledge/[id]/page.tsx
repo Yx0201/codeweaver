@@ -1,10 +1,10 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, BookOpen, FileText, FolderOpen } from "lucide-react";
+import { ArrowLeft, BookOpen, FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import { prisma } from "@/lib/prisma";
 import { UploadFileButton } from "./_components/upload-file-button";
+import { FileList } from "./_components/file-list";
 
 interface PageProps {
   params: Promise<{ id: string }>;
@@ -69,39 +69,16 @@ export default async function KnowledgeBasePage({ params }: PageProps) {
             <p>暂无文件</p>
           </div>
         ) : (
-          <div className="flex flex-col gap-2">
-            {files.map((file) => (
-              <Card key={file.id}>
-                <CardContent className="flex items-center gap-3 py-3">
-                  <FileText className="w-5 h-5 text-muted-foreground" />
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium truncate">{file.filename}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {formatFileSize(file.file_size)} ·{" "}
-                      {formatDate(file.upload_time)} ·{" "}
-                      <span
-                        className={
-                          file.status === "completed"
-                            ? "text-green-600"
-                            : file.status === "failed"
-                              ? "text-destructive"
-                              : "text-yellow-600"
-                        }
-                      >
-                        {file.status === "completed"
-                          ? "已完成"
-                          : file.status === "processing"
-                            ? "处理中"
-                            : file.status === "failed"
-                              ? "处理失败"
-                              : "已上传"}
-                      </span>
-                    </p>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+          <FileList
+            knowledgeBaseId={knowledgeBaseId}
+            files={files.map((f) => ({
+              id: f.id,
+              filename: f.filename,
+              fileSize: formatFileSize(f.file_size),
+              uploadTime: formatDate(f.upload_time),
+              status: f.status,
+            }))}
+          />
         )}
       </div>
     </div>

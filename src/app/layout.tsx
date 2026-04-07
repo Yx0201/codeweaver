@@ -24,13 +24,13 @@ export default function RootLayout({
       lang="en"
       className={cn("h-full antialiased", "font-sans", geist.variable)}
     >
-      <body className="min-h-full flex flex-col bg-sidebar">
+      <body className="h-full flex flex-col overflow-hidden bg-sidebar">
         <TooltipProvider>
           <SidebarProvider>
             <AppSidebar />
             <SidebarInset className="mt-2 mr-2 mb-2 border rounded-lg border-border bg-popover">
               <Header />
-              <main className="flex-1 overflow-auto">
+              <main className="flex-1 overflow-auto flex flex-col">
                 {children}
               </main>
             </SidebarInset>

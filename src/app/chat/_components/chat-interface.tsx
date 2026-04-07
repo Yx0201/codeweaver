@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   MessageActions,
   MessageAction,
@@ -28,6 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { createConversation } from "@/actions/conversation";
 
 interface KnowledgeBase {
   id: number;
@@ -35,44 +36,80 @@ interface KnowledgeBase {
   description: string | null;
 }
 
-interface ChatInterfaceProps {
-  knowledgeBases: KnowledgeBase[];
+interface InitialMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  parts: { type: "text"; text: string }[];
 }
 
-export function ChatInterface({ knowledgeBases }: ChatInterfaceProps) {
+interface ChatInterfaceProps {
+  conversationId?: string;
+  initialMessages?: InitialMessage[];
+  knowledgeBases: KnowledgeBase[];
+  onConversationCreated: (id: string, firstMessage: string) => void;
+}
+
+export function ChatInterface({
+  conversationId,
+  initialMessages,
+  knowledgeBases,
+  onConversationCreated,
+}: ChatInterfaceProps) {
   const [input, setInput] = useState("");
   const [selectedKbId, setSelectedKbId] = useState<string>("");
+  // ref to track the current conversationId without causing re-renders
+  const conversationIdRef = useRef(conversationId);
+  conversationIdRef.current = conversationId;
 
   const kbId =
     selectedKbId && selectedKbId !== "none"
       ? parseInt(selectedKbId)
       : undefined;
 
-  const { messages, sendMessage, status, regenerate } = useChat();
+  const { messages, sendMessage, status, regenerate } = useChat({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    messages: initialMessages as any,
+  });
 
-  const handleSubmit = (message: PromptInputMessage) => {
-    if (message.text.trim()) {
-      sendMessage(
-        { text: message.text },
-        kbId ? { body: { knowledgeBaseId: kbId } } : undefined
-      );
-      setInput("");
+  const handleSubmit = async (message: PromptInputMessage) => {
+    if (!message.text.trim()) return;
+
+    let convId = conversationIdRef.current;
+
+    // First message in a new conversation: create the conversation record first
+    if (!convId) {
+      const conv = await createConversation();
+      convId = conv.id;
+      conversationIdRef.current = convId;
+      // Notify parent: updates URL + starts title generation (non-blocking)
+      onConversationCreated(convId, message.text);
     }
+
+    sendMessage(
+      { text: message.text },
+      {
+        body: {
+          conversationId: convId,
+          ...(kbId ? { knowledgeBaseId: kbId } : {}),
+        },
+      }
+    );
+    setInput("");
   };
 
   return (
     <div className="w-full mx-auto p-6 relative h-full">
       <div className="flex flex-col h-full">
-        <Conversation>
+        <Conversation className="min-h-0">
           <ConversationContent>
             {messages.map((message, messageIndex) => (
               <Fragment key={message.id}>
                 {message.parts.map((part, i) => {
                   switch (part.type) {
-                    case "text":
+                    case "text": {
                       const isLastMessage =
                         messageIndex === messages.length - 1;
-
                       return (
                         <Fragment key={`${message.id}-${i}`}>
                           <Message from={message.role}>
@@ -107,6 +144,7 @@ export function ChatInterface({ knowledgeBases }: ChatInterfaceProps) {
                           )}
                         </Fragment>
                       );
+                    }
                     default:
                       return null;
                   }
@@ -131,7 +169,7 @@ export function ChatInterface({ knowledgeBases }: ChatInterfaceProps) {
           <ConversationScrollButton />
         </Conversation>
 
-        <div className="mt-4 w-full max-w-2xl mx-auto flex flex-col gap-2">
+        <div className="mt-4 w-full max-w-2xl mx-auto flex flex-col gap-2 shrink-0">
           <div className="flex items-center gap-2">
             <BookOpen className="size-4 text-muted-foreground" />
             <Select value={selectedKbId} onValueChange={setSelectedKbId}>

@@ -1,6 +1,7 @@
 import { streamText, convertToModelMessages, UIMessage } from "ai";
 import model from "@/register/model";
 import { vectorSearch } from "@/lib/vector-search";
+import { prisma } from "@/lib/prisma";
 
 export const maxDuration = 60;
 
@@ -8,7 +9,32 @@ export async function POST(req: Request) {
   const {
     messages,
     knowledgeBaseId,
-  }: { messages: UIMessage[]; knowledgeBaseId?: number } = await req.json();
+    conversationId,
+  }: {
+    messages: UIMessage[];
+    knowledgeBaseId?: number;
+    conversationId?: string;
+  } = await req.json();
+
+  // Save the latest user message
+  if (conversationId) {
+    const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+    if (lastUserMsg) {
+      const text = lastUserMsg.parts
+        ?.filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("") ?? "";
+      if (text) {
+        await prisma.conversation_message.create({
+            data: {
+              conversation_id: conversationId,
+              role: "user",
+              content: text,
+            },
+          });
+      }
+    }
+  }
 
   let systemPrompt: string | undefined;
 
@@ -37,6 +63,34 @@ export async function POST(req: Request) {
     model,
     system: systemPrompt,
     messages: await convertToModelMessages(messages),
+    onFinish: async ({ response }) => {
+      if (!conversationId) return;
+      const assistantMsg = response.messages.find((m) => m.role === "assistant");
+      if (assistantMsg) {
+        const text =
+          typeof assistantMsg.content === "string"
+            ? assistantMsg.content
+            : assistantMsg.content
+                .filter(
+                  (p): p is { type: "text"; text: string } => p.type === "text"
+                )
+                .map((p) => p.text)
+                .join("");
+        if (text) {
+          await prisma.conversation_message.create({
+            data: {
+              conversation_id: conversationId,
+              role: "assistant",
+              content: text,
+            },
+          });
+        }
+      }
+      await prisma.conversation.update({
+        where: { id: conversationId },
+        data: { updated_at: new Date() },
+      });
+    },
   });
 
   return result.toUIMessageStreamResponse();
