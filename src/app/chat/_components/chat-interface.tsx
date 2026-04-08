@@ -64,6 +64,9 @@ export function ChatInterface({
     conversationIdRef.current = conversationId;
   }, [conversationId]);
 
+  // Store the last system prompt for regenerate
+  const lastSystemPromptRef = useRef<string | undefined>(undefined);
+
   const kbId =
     selectedKbId && selectedKbId !== "none"
       ? parseInt(selectedKbId)
@@ -73,6 +76,48 @@ export function ChatInterface({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     messages: initialMessages as any,
   });
+
+  /**
+   * Run the RAG pipeline: vector search → system prompt.
+   * This is the same sequence the evaluation script uses,
+   * ensuring identical behavior for users and tests.
+   */
+  const fetchRagContext = async (
+    query: string,
+    knowledgeBaseId: number
+  ): Promise<string | undefined> => {
+    // Step 1: Vector search
+    const searchRes = await fetch("/api/vector-search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        knowledgeBaseId,
+        topK: 5,
+      }),
+    });
+
+    if (!searchRes.ok) return undefined;
+
+    const { results } = await searchRes.json();
+    if (!results || results.length === 0) return undefined;
+
+    // Step 2: Build system prompt from retrieved contexts
+    const contexts: string[] = results.map(
+      (r: { chunk_text: string }) => r.chunk_text
+    );
+
+    const promptRes = await fetch("/api/system-prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contexts }),
+    });
+
+    if (!promptRes.ok) return undefined;
+
+    const { systemPrompt } = await promptRes.json();
+    return systemPrompt;
+  };
 
   const handleSubmit = async (message: PromptInputMessage) => {
     if (!message.text.trim()) return;
@@ -88,16 +133,37 @@ export function ChatInterface({
       onConversationCreated(convId, message.text);
     }
 
+    // Pre-fetch RAG context (vector search + system prompt) if KB is selected
+    let systemPrompt: string | undefined;
+    if (kbId) {
+      systemPrompt = await fetchRagContext(message.text, kbId);
+      lastSystemPromptRef.current = systemPrompt;
+    } else {
+      lastSystemPromptRef.current = undefined;
+    }
+
     sendMessage(
       { text: message.text },
       {
         body: {
           conversationId: convId,
           ...(kbId ? { knowledgeBaseId: kbId } : {}),
+          ...(systemPrompt ? { systemPrompt } : {}),
         },
       }
     );
     setInput("");
+  };
+
+  const handleRegenerate = () => {
+    regenerate({
+      body: {
+        conversationId: conversationIdRef.current,
+        ...(lastSystemPromptRef.current
+          ? { systemPrompt: lastSystemPromptRef.current }
+          : {}),
+      },
+    });
   };
 
   return (
@@ -129,7 +195,7 @@ export function ChatInterface({
                           {message.role === "assistant" && isLastMessage && (
                             <MessageActions>
                               <MessageAction
-                                onClick={() => regenerate()}
+                                onClick={handleRegenerate}
                                 label="Retry"
                               >
                                 <RefreshCcwIcon className="size-3" />

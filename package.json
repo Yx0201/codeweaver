@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "eval:recall": "packages/rag-eval/venv/bin/python packages/rag-eval/eval_recall.py"
   },
   "dependencies": {
     "@ai-sdk/react": "^3.0.143",

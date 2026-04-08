@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { ChatShell } from "../_components/chat-shell";
 
@@ -26,7 +26,7 @@ export default async function ConversationPage({ params }: PageProps) {
       }),
     ]);
 
-  if (!conversation) notFound();
+  if (!conversation) redirect("/chat");
 
   const initialMessages = messages.map((msg) => ({
     id: msg.id,
