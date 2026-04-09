@@ -26,18 +26,27 @@ from ragas.metrics import (
     ResponseRelevancy,
     Faithfulness,
 )
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
+from langchain_openai import ChatOpenAI
+from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+# Load .env.local from the project root
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env.local"))
+
 # Next.js server URL — the script calls the same APIs the chat page uses
 NEXTJS_BASE_URL = os.environ.get("NEXTJS_BASE_URL", "http://localhost:3000")
 
-# Ollama models used by ragas for metric evaluation (not for the RAG pipeline)
+# Ollama embedding model for ragas metric evaluation (not for the RAG pipeline)
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-LLM_MODEL = "qcwind/qwen3-8b-instruct-Q4-K-M:latest"
 EMBEDDING_MODEL = "bge-m3:latest"
+
+# External LLM for ragas metric scoring (better quality than local models)
+ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
+ZHIPU_BASE_URL = os.environ.get("ZHIPU_BASE_URL", "")
+ZHIPU_MODEL_NAME = os.environ.get("ZHIPU_MODEL_NAME", "")
 
 TOP_K = 5  # number of chunks to retrieve per query
 
@@ -390,8 +399,8 @@ async def run_evaluation():
     print("  RAG Recall Evaluation (ragas)")
     print("=" * 60)
     print(f"Next.js URL:     {NEXTJS_BASE_URL}")
-    print(f"Eval LLM:        {LLM_MODEL}")
-    print(f"Eval Embeddings: {EMBEDDING_MODEL}")
+    print(f"Scoring LLM:     {ZHIPU_MODEL_NAME} (via {ZHIPU_BASE_URL})")
+    print(f"Eval Embeddings: {EMBEDDING_MODEL} (local Ollama)")
     print(f"Ollama URL:      {OLLAMA_BASE_URL}")
     print(f"Golden Dataset:  {len(GOLDEN_DATASET)} questions")
     print("=" * 60)
@@ -444,12 +453,17 @@ async def run_evaluation():
 
     dataset = EvaluationDataset.from_list(eval_samples)
 
-    # 4. Configure ragas with local Ollama models
+    # 4. Configure ragas: external LLM for scoring, local Ollama for embeddings
     print("[3/3] Running ragas evaluation (this may take a while)...\n")
 
-    llm = ChatOllama(
-        model=LLM_MODEL,
-        base_url=OLLAMA_BASE_URL,
+    if not ZHIPU_API_KEY or not ZHIPU_BASE_URL or not ZHIPU_MODEL_NAME:
+        print("ERROR: ZHIPU_API_KEY, ZHIPU_BASE_URL, ZHIPU_MODEL_NAME must be set in .env.local")
+        sys.exit(1)
+
+    scoring_llm = ChatOpenAI(
+        model=ZHIPU_MODEL_NAME,
+        api_key=ZHIPU_API_KEY,
+        base_url=ZHIPU_BASE_URL,
         temperature=0,
     )
     embeddings = OllamaEmbeddings(
@@ -457,14 +471,14 @@ async def run_evaluation():
         base_url=OLLAMA_BASE_URL,
     )
 
-    ragas_llm = LangchainLLMWrapper(llm)
+    ragas_llm = LangchainLLMWrapper(scoring_llm)
     ragas_embeddings = LangchainEmbeddingsWrapper(embeddings)
 
     metrics = [
         LLMContextRecall(llm=ragas_llm),
-        # ContextPrecision(llm=ragas_llm),
-        # ResponseRelevancy(llm=ragas_llm, embeddings=ragas_embeddings),
-        # Faithfulness(llm=ragas_llm),
+        ContextPrecision(llm=ragas_llm),
+        ResponseRelevancy(llm=ragas_llm, embeddings=ragas_embeddings),
+        Faithfulness(llm=ragas_llm),
     ]
 
     result = evaluate(
