@@ -48,3 +48,6 @@ __pycache__/
 *.pyc
 *.pyo
 packages/rag-eval/eval_results.json
+
+# log
+specCoding

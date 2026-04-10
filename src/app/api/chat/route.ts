@@ -1,17 +1,32 @@
 import { streamText, generateText } from "ai";
 import model from "@/register/model";
-import { vectorSearch } from "@/lib/vector-search";
+import { hybridSearch } from "@/lib/hybrid-search";
 import { buildRagSystemPrompt } from "@/lib/rag-service";
 import { prisma } from "@/lib/prisma";
 
 export const maxDuration = 60;
 
+/** Message in UIMessage format (from @ai-sdk/react) */
+interface UIMessageInput {
+  role: "user" | "assistant" | "system";
+  parts?: { type: string; text?: string }[];
+  content?: string;
+}
+
+/** Message in simple format (from Python eval script) */
+interface SimpleMessageInput {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+type ChatMessageInput = UIMessageInput | SimpleMessageInput;
+
 /**
  * Extract text from a message, supporting both UIMessage format (with parts)
  * and simple {role, content} format (from the Python eval script).
  */
-function extractMessageText(msg: { parts?: { type: string; text?: string }[]; content?: string }): string {
-  if (msg.parts) {
+function extractMessageText(msg: ChatMessageInput): string {
+  if ("parts" in msg && msg.parts) {
     return msg.parts
       .filter((p): p is { type: "text"; text: string } => p.type === "text")
       .map((p) => p.text)
@@ -20,13 +35,19 @@ function extractMessageText(msg: { parts?: { type: string; text?: string }[]; co
   return typeof msg.content === "string" ? msg.content : "";
 }
 
+/** Core message format accepted by generateText / streamText */
+interface CoreMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
 /**
  * Normalize messages to CoreMessage[] for generateText / streamText.
  * Handles both UIMessage format and simple {role, content} format.
  */
-function normalizeMessages(messages: any[]) {
+function normalizeMessages(messages: ChatMessageInput[]): CoreMessage[] {
   return messages.map((m) => ({
-    role: m.role as "user" | "assistant" | "system",
+    role: m.role,
     content: extractMessageText(m),
   }));
 }
@@ -38,12 +59,18 @@ export async function POST(req: Request) {
     conversationId,
     systemPrompt: providedSystemPrompt,
     mode,
+    vectorTopK,
+    keywordTopK,
+    finalTopK,
   }: {
-    messages: any[];
+    messages: ChatMessageInput[];
     knowledgeBaseId?: number;
     conversationId?: string;
     systemPrompt?: string;
     mode?: "stream" | "eval";
+    vectorTopK?: number;
+    keywordTopK?: number;
+    finalTopK?: number;
   } = await req.json();
 
   // --- Resolve system prompt ---
@@ -58,21 +85,32 @@ export async function POST(req: Request) {
     const query = lastUserMessage ? extractMessageText(lastUserMessage) : "";
 
     if (query) {
-      const results = await vectorSearch(query, knowledgeBaseId, 5);
+      const results = await hybridSearch(
+        query,
+        knowledgeBaseId,
+        vectorTopK ?? 5,
+        keywordTopK ?? 5,
+        finalTopK ?? 5
+      );
       retrievedContexts = results.map((r) => r.chunk_text);
       if (results.length > 0) {
         systemPrompt = buildRagSystemPrompt(retrievedContexts);
       }
     }
   } else if (systemPrompt && knowledgeBaseId && mode === "eval") {
-    // When systemPrompt is provided directly, retrieve contexts for the eval response
     const lastUserMessage = [...messages]
       .reverse()
       .find((m) => m.role === "user");
     const query = lastUserMessage ? extractMessageText(lastUserMessage) : "";
 
     if (query) {
-      const results = await vectorSearch(query, knowledgeBaseId, 5);
+      const results = await hybridSearch(
+        query,
+        knowledgeBaseId,
+        vectorTopK ?? 5,
+        keywordTopK ?? 5,
+        finalTopK ?? 5
+      );
       retrievedContexts = results.map((r) => r.chunk_text);
     }
   }

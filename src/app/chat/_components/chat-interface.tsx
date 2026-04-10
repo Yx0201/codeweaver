@@ -86,14 +86,16 @@ export function ChatInterface({
     query: string,
     knowledgeBaseId: number
   ): Promise<string | undefined> => {
-    // Step 1: Vector search
+    // Step 1: Hybrid search (vector + keyword + RRF)
     const searchRes = await fetch("/api/vector-search", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         query,
         knowledgeBaseId,
-        topK: 5,
+        vectorTopK: 5,
+        keywordTopK: 5,
+        finalTopK: 5,
       }),
     });
 

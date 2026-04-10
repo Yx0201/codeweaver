@@ -9,6 +9,15 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
+/**
+ * Streaming upload: returns NDJSON progress events.
+ *
+ * Events:
+ *   { "type": "start",    "totalChunks": N }
+ *   { "type": "progress", "completedChunks": M, "totalChunks": N }
+ *   { "type": "complete", "fileId": "...", "totalChunks": N }
+ *   { "type": "error",    "error": "..." }
+ */
 export async function POST(req: NextRequest, { params }: RouteParams) {
   const { id } = await params;
   const knowledgeBaseId = parseInt(id);
@@ -52,54 +61,88 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     },
   });
 
+  // Split text into chunks
+  const splitter = new RecursiveCharacterTextSplitter({
+    chunkSize: 500,
+    chunkOverlap: 100,
+  });
+
+  let chunks: string[];
   try {
-    // Split text into chunks
-    const splitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 500,
-      chunkOverlap: 100,
-    });
-    const chunks = await splitter.splitText(content);
-
-    // Generate embeddings in batches of 10
-    const BATCH_SIZE = 10;
-    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-      const batch = chunks.slice(i, i + BATCH_SIZE);
-      const embeddings = await generateEmbeddings(batch);
-
-      for (let j = 0; j < batch.length; j++) {
-        const vectorStr = `[${embeddings[j].join(",")}]`;
-        await prisma.$executeRawUnsafe(
-          `INSERT INTO document_chunks (file_id, chunk_text, embedding, chunk_order, metadata)
-           VALUES ($1::uuid, $2, $3::vector, $4, $5::jsonb)`,
-          fileRecord.id,
-          batch[j],
-          vectorStr,
-          i + j,
-          JSON.stringify({ source: file.name })
-        );
-      }
-    }
-
-    // Update file status to completed
-    await prisma.uploaded_files.update({
-      where: { id: fileRecord.id },
-      data: { status: "completed" },
-    });
-
-    return NextResponse.json({
-      success: true,
-      fileId: fileRecord.id,
-      chunks: chunks.length,
-    });
+    chunks = await splitter.splitText(content);
   } catch (error) {
-    console.error("File processing failed:", error);
+    console.error("Text splitting failed:", error);
     await prisma.uploaded_files.update({
       where: { id: fileRecord.id },
       data: { status: "failed" },
     });
     return NextResponse.json(
-      { error: "文件处理失败，请重试" },
+      { error: "文件分块失败" },
       { status: 500 }
     );
   }
+
+  const totalChunks = chunks.length;
+
+  // Create a streaming response
+  const stream = new ReadableStream({
+    async start(controller) {
+      const encoder = new TextEncoder();
+      const send = (data: Record<string, unknown>) => {
+        controller.enqueue(encoder.encode(JSON.stringify(data) + "\n"));
+      };
+
+      send({ type: "start", totalChunks });
+
+      try {
+        const BATCH_SIZE = 10;
+        let completedChunks = 0;
+
+        for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+          const batch = chunks.slice(i, i + BATCH_SIZE);
+          const embeddings = await generateEmbeddings(batch);
+
+          for (let j = 0; j < batch.length; j++) {
+            const vectorStr = `[${embeddings[j].join(",")}]`;
+            await prisma.$executeRawUnsafe(
+              `INSERT INTO document_chunks (file_id, chunk_text, embedding, keywords, chunk_order, metadata)
+               VALUES ($1::uuid, $2, $3::vector, to_tsvector('jiebacfg', $2), $4, $5::jsonb)`,
+              fileRecord.id,
+              batch[j],
+              vectorStr,
+              i + j,
+              JSON.stringify({ source: file.name })
+            );
+            completedChunks++;
+          }
+
+          send({ type: "progress", completedChunks, totalChunks });
+        }
+
+        // Update file status to completed
+        await prisma.uploaded_files.update({
+          where: { id: fileRecord.id },
+          data: { status: "completed" },
+        });
+
+        send({ type: "complete", fileId: fileRecord.id, totalChunks });
+      } catch (error) {
+        console.error("File processing failed:", error);
+        await prisma.uploaded_files.update({
+          where: { id: fileRecord.id },
+          data: { status: "failed" },
+        });
+        send({ type: "error", error: "文件处理失败，请重试" });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "application/x-ndjson",
+      "Transfer-Encoding": "chunked",
+    },
+  });
 }
