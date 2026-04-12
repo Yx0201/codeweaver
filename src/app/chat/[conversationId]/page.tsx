@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { ChatShell } from "../_components/chat-shell";
+import type { SearchMode } from "@/actions/conversation";
 
 interface PageProps {
   params: Promise<{ conversationId: string }>;
@@ -46,6 +47,8 @@ export default async function ConversationPage({ params }: PageProps) {
       }))}
       initialConversationId={conversationId}
       initialMessages={initialMessages}
+      initialKbId={conversation.knowledge_base_id}
+      initialSearchMode={(conversation.search_mode as SearchMode) ?? "hybrid"}
       knowledgeBases={knowledgeBases}
     />
   );

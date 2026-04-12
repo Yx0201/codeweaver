@@ -9,6 +9,16 @@ interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
+// Parent chunk: large context window for LLM generation
+const PARENT_CHUNK_SIZE = 1000;
+const PARENT_CHUNK_OVERLAP = 200;
+
+// Child chunk: retrieval units — 500 chars balances precision (small enough
+// for accurate vector matching) with context (large enough to contain query terms).
+// 300 chars was too small: key query terms often fell outside the chunk boundary.
+const CHILD_CHUNK_SIZE = 500;
+const CHILD_CHUNK_OVERLAP = 100;
+
 /**
  * Streaming upload: returns NDJSON progress events.
  *
@@ -61,15 +71,15 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     },
   });
 
-  // Split text into chunks
-  const splitter = new RecursiveCharacterTextSplitter({
-    chunkSize: 500,
-    chunkOverlap: 100,
+  // Step 1: Split into parent chunks (large, for generation context)
+  const parentSplitter = new RecursiveCharacterTextSplitter({
+    chunkSize: PARENT_CHUNK_SIZE,
+    chunkOverlap: PARENT_CHUNK_OVERLAP,
   });
 
-  let chunks: string[];
+  let parentTexts: string[];
   try {
-    chunks = await splitter.splitText(content);
+    parentTexts = await parentSplitter.splitText(content);
   } catch (error) {
     console.error("Text splitting failed:", error);
     await prisma.uploaded_files.update({
@@ -82,7 +92,20 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     );
   }
 
-  const totalChunks = chunks.length;
+  // Step 2: Split each parent into child chunks (small, for precise retrieval)
+  const childSplitter = new RecursiveCharacterTextSplitter({
+    chunkSize: CHILD_CHUNK_SIZE,
+    chunkOverlap: CHILD_CHUNK_OVERLAP,
+  });
+
+  const parentChildMap: { parentText: string; parentId: string; childTexts: string[] }[] = [];
+  let totalChildChunks = 0;
+
+  for (const parentText of parentTexts) {
+    const childTexts = await childSplitter.splitText(parentText);
+    parentChildMap.push({ parentText, parentId: "", childTexts });
+    totalChildChunks += childTexts.length;
+  }
 
   // Create a streaming response
   const stream = new ReadableStream({
@@ -92,31 +115,52 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         controller.enqueue(encoder.encode(JSON.stringify(data) + "\n"));
       };
 
-      send({ type: "start", totalChunks });
+      send({ type: "start", totalChunks: totalChildChunks + parentTexts.length });
 
       try {
-        const BATCH_SIZE = 10;
         let completedChunks = 0;
 
-        for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-          const batch = chunks.slice(i, i + BATCH_SIZE);
-          const embeddings = await generateEmbeddings(batch);
+        // Step 3: Insert parent chunks (no embedding, no keywords — parents are not searched)
+        for (let i = 0; i < parentChildMap.length; i++) {
+          const entry = parentChildMap[i];
+          const parentRows = await prisma.$queryRawUnsafe<{ id: string }[]>(
+            `INSERT INTO document_chunks (file_id, chunk_text, chunk_order, chunk_type, metadata)
+             VALUES ($1::uuid, $2, $3, 'parent', $4::jsonb)
+             RETURNING id`,
+            fileRecord.id,
+            entry.parentText,
+            i,
+            JSON.stringify({ source: file.name })
+          );
+          entry.parentId = parentRows[0].id;
+          completedChunks++;
+          send({ type: "progress", completedChunks, totalChunks: totalChildChunks + parentTexts.length });
+        }
 
-          for (let j = 0; j < batch.length; j++) {
-            const vectorStr = `[${embeddings[j].join(",")}]`;
-            await prisma.$executeRawUnsafe(
-              `INSERT INTO document_chunks (file_id, chunk_text, embedding, keywords, chunk_order, metadata)
-               VALUES ($1::uuid, $2, $3::vector, to_tsvector('jiebacfg', $2), $4, $5::jsonb)`,
-              fileRecord.id,
-              batch[j],
-              vectorStr,
-              i + j,
-              JSON.stringify({ source: file.name })
-            );
-            completedChunks++;
+        // Step 4: Insert child chunks with embeddings and keywords
+        const BATCH_SIZE = 10;
+        for (const entry of parentChildMap) {
+          for (let i = 0; i < entry.childTexts.length; i += BATCH_SIZE) {
+            const batch = entry.childTexts.slice(i, i + BATCH_SIZE);
+            const embeddings = await generateEmbeddings(batch);
+
+            for (let j = 0; j < batch.length; j++) {
+              const vectorStr = `[${embeddings[j].join(",")}]`;
+              await prisma.$executeRawUnsafe(
+                `INSERT INTO document_chunks (file_id, chunk_text, embedding, keywords, chunk_order, chunk_type, parent_chunk_id, metadata)
+                 VALUES ($1::uuid, $2, $3::vector, to_tsvector('jiebacfg', $2), $4, 'child', $5::uuid, $6::jsonb)`,
+                fileRecord.id,
+                batch[j],
+                vectorStr,
+                i + j,
+                entry.parentId,
+                JSON.stringify({ source: file.name })
+              );
+              completedChunks++;
+            }
+
+            send({ type: "progress", completedChunks, totalChunks: totalChildChunks + parentTexts.length });
           }
-
-          send({ type: "progress", completedChunks, totalChunks });
         }
 
         // Update file status to completed
@@ -125,7 +169,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           data: { status: "completed" },
         });
 
-        send({ type: "complete", fileId: fileRecord.id, totalChunks });
+        send({ type: "complete", fileId: fileRecord.id, totalChunks: completedChunks });
       } catch (error) {
         console.error("File processing failed:", error);
         await prisma.uploaded_files.update({

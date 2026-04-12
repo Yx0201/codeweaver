@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { ConversationSidebar } from "./conversation-sidebar";
 import { ChatInterface } from "./chat-interface";
+import type { SearchMode } from "@/actions/conversation";
 
 export interface ConversationItem {
   id: string;
@@ -29,6 +30,8 @@ interface ChatShellProps {
   initialConversations: ConversationItem[];
   initialConversationId?: string;
   initialMessages?: InitialMessage[];
+  initialKbId?: number | null;
+  initialSearchMode?: SearchMode;
   knowledgeBases: KnowledgeBase[];
 }
 
@@ -36,6 +39,8 @@ export function ChatShell({
   initialConversations,
   initialConversationId,
   initialMessages,
+  initialKbId,
+  initialSearchMode,
   knowledgeBases,
 }: ChatShellProps) {
   const router = useRouter();
@@ -128,6 +133,16 @@ export function ChatShell({
           initialMessages={
             currentConversationId === initialConversationId
               ? initialMessages
+              : undefined
+          }
+          initialKbId={
+            currentConversationId === initialConversationId
+              ? initialKbId
+              : undefined
+          }
+          initialSearchMode={
+            currentConversationId === initialConversationId
+              ? initialSearchMode
               : undefined
           }
           knowledgeBases={knowledgeBases}

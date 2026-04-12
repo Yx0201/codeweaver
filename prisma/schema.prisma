@@ -8,11 +8,16 @@ datasource db {
 }
 
 model conversation {
-  id         String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  title      String?
-  created_at DateTime?              @default(now()) @db.Timestamp(6)
-  updated_at DateTime?              @default(now()) @db.Timestamp(6)
-  messages   conversation_message[]
+  id                String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title             String?
+  search_mode       String?                @default("hybrid") @db.VarChar(20)
+  created_at        DateTime?              @default(now()) @db.Timestamp(6)
+  updated_at        DateTime?              @default(now()) @db.Timestamp(6)
+  knowledge_base_id Int?
+  messages          conversation_message[]
+  knowledge_base    knowledge_base?        @relation(fields: [knowledge_base_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+
+  @@index([knowledge_base_id], map: "idx_conversation_kbid")
 }
 
 model conversation_message {
@@ -27,17 +32,71 @@ model conversation_message {
 }
 
 model document_chunks {
-  id             String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  file_id        String                 @db.Uuid
-  chunk_text     String
-  embedding      Unsupported("vector(1024)")?
-  keywords       Unsupported("tsvector")?
-  chunk_order    Int?
-  metadata       Json?
-  created_at     DateTime?              @default(now()) @db.Timestamp(6)
-  uploaded_files uploaded_files         @relation(fields: [file_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  id              String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  file_id         String                 @db.Uuid
+  chunk_text      String
+  embedding       Unsupported("vector(1024)")?
+  keywords        Unsupported("tsvector")?
+  chunk_order     Int?
+  metadata        Json?
+  created_at      DateTime?              @default(now()) @db.Timestamp(6)
+  parent_chunk_id String?                @db.Uuid
+  chunk_type      String?                @db.VarChar(20)
+  uploaded_files  uploaded_files         @relation(fields: [file_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  parent_chunk    document_chunks?       @relation("ParentChild", fields: [parent_chunk_id], references: [id], onDelete: Cascade)
+  child_chunks    document_chunks[]      @relation("ParentChild")
+  entity_chunks   kg_entity_chunk[]
 
   @@index([file_id], map: "idx_document_chunks_file_id")
+  @@index([parent_chunk_id], map: "idx_document_chunks_parent_id")
+}
+
+model kg_entity {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  knowledge_base_id Int
+  name              String        @db.VarChar(500)
+  entity_type       String        @db.VarChar(50)
+  description       String?
+  name_embedding    Unsupported("vector(1024)")?
+  name_keywords     Unsupported("tsvector")?
+  metadata          Json?
+  created_at        DateTime?     @default(now()) @db.Timestamp(6)
+  source_relations  kg_relation[] @relation("SourceEntity")
+  target_relations  kg_relation[] @relation("TargetEntity")
+  entity_chunks     kg_entity_chunk[]
+
+  @@index([knowledge_base_id], map: "idx_kg_entity_kbid")
+  @@index([name], map: "idx_kg_entity_name")
+}
+
+model kg_relation {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  knowledge_base_id Int
+  source_entity_id  String    @db.Uuid
+  target_entity_id  String    @db.Uuid
+  relation_type     String    @db.VarChar(200)
+  description       String?
+  metadata          Json?
+  created_at        DateTime? @default(now()) @db.Timestamp(6)
+  source_entity     kg_entity @relation("SourceEntity", fields: [source_entity_id], references: [id], onDelete: Cascade)
+  target_entity     kg_entity @relation("TargetEntity", fields: [target_entity_id], references: [id], onDelete: Cascade)
+
+  @@index([knowledge_base_id], map: "idx_kg_relation_kbid")
+  @@index([source_entity_id], map: "idx_kg_relation_source")
+  @@index([target_entity_id], map: "idx_kg_relation_target")
+}
+
+model kg_entity_chunk {
+  id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  entity_id  String          @db.Uuid
+  chunk_id   String          @db.Uuid
+  created_at DateTime?       @default(now()) @db.Timestamp(6)
+  entity     kg_entity       @relation(fields: [entity_id], references: [id], onDelete: Cascade)
+  chunk      document_chunks @relation(fields: [chunk_id], references: [id], onDelete: Cascade)
+
+  @@unique([entity_id, chunk_id], map: "idx_kg_entity_chunk_unique")
+  @@index([entity_id], map: "idx_kg_ec_entity")
+  @@index([chunk_id], map: "idx_kg_ec_chunk")
 }
 
 model knowledge_base {
@@ -47,6 +106,7 @@ model knowledge_base {
   created_at     DateTime?        @default(now()) @db.Timestamp(6)
   updated_at     DateTime?        @default(now()) @db.Timestamp(6)
   uploaded_files uploaded_files[]
+  conversations  conversation[]
 }
 
 model uploaded_files {

@@ -1,4 +1,5 @@
-import { hybridSearch } from "@/lib/hybrid-search";
+import { hybridSearch, type HybridSearchOptions } from "@/lib/hybrid-search";
+import { DEFAULT_VECTOR_TOP_K, DEFAULT_KEYWORD_TOP_K, DEFAULT_FINAL_TOP_K } from "@/lib/config";
 
 interface VectorSearchRequest {
   query: string;
@@ -7,6 +8,11 @@ interface VectorSearchRequest {
   vectorTopK?: number;
   keywordTopK?: number;
   finalTopK?: number;
+  useReranker?: boolean;
+  rerankerTopK?: number;
+  fusionTopK?: number;
+  useGraph?: boolean;
+  graphTopK?: number;
 }
 
 export async function POST(req: Request) {
@@ -18,6 +24,11 @@ export async function POST(req: Request) {
     vectorTopK,
     keywordTopK,
     finalTopK,
+    useReranker,
+    rerankerTopK,
+    fusionTopK,
+    useGraph,
+    graphTopK,
   } = body;
 
   if (!query || !knowledgeBaseId) {
@@ -27,12 +38,21 @@ export async function POST(req: Request) {
     );
   }
 
+  const options: HybridSearchOptions = {
+    useReranker: useReranker ?? true,
+    rerankerTopK,
+    fusionTopK,
+    useGraph: useGraph ?? false,
+    graphTopK,
+  };
+
   const results = await hybridSearch(
     query,
     knowledgeBaseId,
-    vectorTopK ?? topK ?? 5,
-    keywordTopK ?? topK ?? 5,
-    finalTopK ?? topK ?? 5
+    vectorTopK ?? topK ?? DEFAULT_VECTOR_TOP_K,
+    keywordTopK ?? topK ?? DEFAULT_KEYWORD_TOP_K,
+    finalTopK ?? topK ?? DEFAULT_FINAL_TOP_K,
+    options
   );
 
   return Response.json({ results });

@@ -49,14 +49,44 @@ ZHIPU_BASE_URL = os.environ.get("ZHIPU_BASE_URL", "")
 ZHIPU_MODEL_NAME = os.environ.get("ZHIPU_MODEL_NAME", "")
 
 # Hybrid retrieval Top-K parameters
-VECTOR_TOP_K = int(os.environ.get("VECTOR_TOP_K", "5"))
-KEYWORD_TOP_K = int(os.environ.get("KEYWORD_TOP_K", "5"))
-FINAL_TOP_K = int(os.environ.get("FINAL_TOP_K", "5"))
+VECTOR_TOP_K = int(os.environ.get("VECTOR_TOP_K", "50"))
+KEYWORD_TOP_K = int(os.environ.get("KEYWORD_TOP_K", "50"))
+FINAL_TOP_K = int(os.environ.get("FINAL_TOP_K", "10"))
 
 # ---------------------------------------------------------------------------
-# Golden Dataset — derived from 张三.txt
+# Dataset loading
 # ---------------------------------------------------------------------------
-GOLDEN_DATASET = [
+DATASETS_DIR = os.path.join(os.path.dirname(__file__), "datasets")
+
+def load_dataset(dataset_name: str | None = None) -> list[dict]:
+    """Load golden dataset from JSON file.
+
+    If dataset_name is provided, loads datasets/<dataset_name>.json.
+    Otherwise falls back to the default inline dataset.
+    """
+    if dataset_name:
+        path = os.path.join(DATASETS_DIR, f"{dataset_name}.json")
+        if not os.path.exists(path):
+            print(f"ERROR: Dataset file not found: {path}")
+            sys.exit(1)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        print(f"Loaded dataset: {path} ({len(data)} questions)")
+        return data
+
+    # Default: use golden_v1.json if it exists, otherwise inline
+    default_path = os.path.join(DATASETS_DIR, "golden_v1.json")
+    if os.path.exists(default_path):
+        with open(default_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        print(f"Loaded dataset: {default_path} ({len(data)} questions)")
+        return data
+
+    # Fallback inline dataset (original 8 questions)
+    return _INLINE_DATASET
+
+
+_INLINE_DATASET = [
     {
         "user_input": "易飒小时候在车里遇到危险时是怎么躲藏的？",
         "reference": "易飒拽过爸爸的一件黑色大棉袄，把自己整个儿罩住，然后安静地、蜷缩着、躺了下去，藏在车座下面。",
@@ -209,6 +239,15 @@ def resolve_knowledge_base_id() -> int:
 # ---------------------------------------------------------------------------
 
 async def run_evaluation():
+    # Support --dataset argument
+    dataset_name = None
+    for i, arg in enumerate(sys.argv[1:]):
+        if arg == "--dataset" and i + 1 < len(sys.argv[1:]):
+            dataset_name = sys.argv[i + 2]
+            break
+
+    golden_dataset = load_dataset(dataset_name)
+
     print("=" * 60)
     print("  RAG Recall Evaluation (ragas) — Hybrid Retrieval")
     print("=" * 60)
@@ -216,7 +255,7 @@ async def run_evaluation():
     print(f"Scoring LLM:     {ZHIPU_MODEL_NAME} (via {ZHIPU_BASE_URL})")
     print(f"Eval Embeddings: {EMBEDDING_MODEL} (local Ollama)")
     print(f"Hybrid Top-K:    vector={VECTOR_TOP_K}, keyword={KEYWORD_TOP_K}, final={FINAL_TOP_K}")
-    print(f"Golden Dataset:  {len(GOLDEN_DATASET)} questions")
+    print(f"Golden Dataset:  {len(golden_dataset)} questions")
     print("=" * 60)
 
     # 1. Resolve knowledge base ID
@@ -225,9 +264,9 @@ async def run_evaluation():
     # 2. Run the RAG pipeline for each question
     print("\n[1/3] Running RAG pipeline to collect responses...")
     sample_list = []
-    for i, item in enumerate(GOLDEN_DATASET):
+    for i, item in enumerate(golden_dataset):
         question = item["user_input"]
-        print(f"  [{i+1}/{len(GOLDEN_DATASET)}] {question}")
+        print(f"  [{i+1}/{len(golden_dataset)}] {question}")
 
         # Step 1: Hybrid search (vector + keyword + RRF)
         search_results = hybrid_search(question, kb_id)

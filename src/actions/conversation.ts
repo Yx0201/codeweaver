@@ -3,16 +3,28 @@
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
 
-export async function createConversation(): Promise<{
+export type SearchMode = "hybrid" | "graph" | "fast";
+
+export async function createConversation(
+  knowledgeBaseId?: number,
+  searchMode: SearchMode = "hybrid"
+): Promise<{
   id: string;
   title: string | null;
+  search_mode: string;
   created_at: string;
   updated_at: string;
 }> {
-  const conv = await prisma.conversation.create({ data: {} });
+  const conv = await prisma.conversation.create({
+    data: {
+      ...(knowledgeBaseId ? { knowledge_base: { connect: { id: knowledgeBaseId } } } : {}),
+      search_mode: searchMode,
+    },
+  });
   return {
     id: conv.id,
     title: conv.title,
+    search_mode: conv.search_mode ?? "hybrid",
     created_at: conv.created_at?.toISOString() ?? new Date().toISOString(),
     updated_at: conv.updated_at?.toISOString() ?? new Date().toISOString(),
   };
