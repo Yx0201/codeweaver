@@ -1,0 +1,90 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(.harness/**)",
+      "Write(.harness/module-history/**)",
+      "Write(.harness/task-archive/**)",
+      "Write(.harness/unknowns.md)",
+      "Write(.harness/handover.md)",
+      "Write(.harness/current-spec.md)",
+      "Write(.harness/current-tasks.md)",
+      "Edit(.harness/route-map.md)",
+      "Edit(.harness/route-map.index.md)",
+      "Edit(.harness/dependency-graph.md)",
+      "Edit(.harness/INDEX.md)",
+      "Edit(.harness/**/INDEX.md)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git blame:*)",
+      "Bash(git diff:*)"
+    ],
+    "deny": [
+      "Write(.harness/conventions.md)",
+      "Write(.harness/decisions.md)",
+      "Edit(.harness/conventions.md)",
+      "Edit(.harness/decisions.md)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"additionalContext\": \"[Harness] 必须先读取 .harness/INDEX.md 再执行任何任务。每次编码任务必须声明任务级别(trivial/standard/complex)并逐步完成流程检查点。\"}'",
+            "statusMessage": "加载 Harness 流程..."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/on-user-prompt.sh",
+            "timeout": 5,
+            "statusMessage": "Harness 流程检查..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "INPUT=$(cat); FILE=$(echo \"$INPUT\" | grep -o '\"file_path\":\\s*\"[^\"]*\"' | head -1 | sed 's/.*\"file_path\":\\s*\"\\([^\"]*\\)\"/\\1/'); if echo \"$FILE\" | grep -qE '(conventions\\.md|decisions\\.md)$'; then echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"conventions.md 和 decisions.md 的修改必须经人工确认。请先向用户展示变更内容并获得明确批准。\"}}'; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/post-code-edit.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/post-code-edit.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "HARNESS_MODE": "strict"
+  }
+}
