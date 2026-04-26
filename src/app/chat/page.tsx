@@ -1,6 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import { ChatShell } from "./_components/chat-shell";
 
+export const dynamic = "force-dynamic";
+
 export default async function ChatPage() {
   const [conversations, knowledgeBases] = await Promise.all([
     prisma.conversation.findMany({

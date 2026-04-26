@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma";
 import { ChatShell } from "../_components/chat-shell";
 import type { SearchMode } from "@/actions/conversation";
 
+export const dynamic = "force-dynamic";
+
 interface PageProps {
   params: Promise<{ conversationId: string }>;
 }
