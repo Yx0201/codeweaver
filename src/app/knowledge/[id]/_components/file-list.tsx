@@ -50,7 +50,10 @@ function DeleteFileDialog({
   const [state, formAction, isPending] = useActionState(deleteFileAction, {});
 
   useEffect(() => {
-    if (state.success) setOpen(false);
+    if (!state.success) return;
+
+    const frame = requestAnimationFrame(() => setOpen(false));
+    return () => cancelAnimationFrame(frame);
   }, [state.success]);
 
   return (
@@ -69,7 +72,7 @@ function DeleteFileDialog({
           <DialogHeader>
             <DialogTitle>删除文件</DialogTitle>
             <DialogDescription>
-              确定要删除文件「{file.filename}」吗？相关的向量数据将一并删除，此操作不可撤销。
+              确定要删除文件「{file.filename}」吗？相关的向量数据和图谱关联都会一并清理，此操作不可撤销。
             </DialogDescription>
           </DialogHeader>
           {state.error && (

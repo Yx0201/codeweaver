@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { generateEmbeddings } from "@/lib/embedding";
+import { ingestKnowledgeGraphChunk } from "@/lib/knowledge-graph";
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
 export const maxDuration = 300;
@@ -108,14 +109,24 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   }
 
   // Create a streaming response
+  let streamClosed = false;
+
   const stream = new ReadableStream({
     async start(controller) {
       const encoder = new TextEncoder();
+
       const send = (data: Record<string, unknown>) => {
-        controller.enqueue(encoder.encode(JSON.stringify(data) + "\n"));
+        if (streamClosed) return;
+
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(data) + "\n"));
+        } catch (error) {
+          streamClosed = true;
+          console.warn("Upload progress stream closed early:", error);
+        }
       };
 
-      send({ type: "start", totalChunks: totalChildChunks + parentTexts.length });
+      send({ type: "start", totalChunks: totalChildChunks + parentTexts.length * 2 });
 
       try {
         let completedChunks = 0;
@@ -134,7 +145,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           );
           entry.parentId = parentRows[0].id;
           completedChunks++;
-          send({ type: "progress", completedChunks, totalChunks: totalChildChunks + parentTexts.length });
+          send({ type: "progress", completedChunks, totalChunks: totalChildChunks + parentTexts.length * 2 });
         }
 
         // Step 4: Insert child chunks with embeddings and keywords
@@ -159,8 +170,19 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
               completedChunks++;
             }
 
-            send({ type: "progress", completedChunks, totalChunks: totalChildChunks + parentTexts.length });
+            send({ type: "progress", completedChunks, totalChunks: totalChildChunks + parentTexts.length * 2 });
           }
+        }
+
+        // Step 5: Extract and persist graph entities / relations from parent chunks
+        for (const entry of parentChildMap) {
+          await ingestKnowledgeGraphChunk({
+            knowledgeBaseId,
+            chunkId: entry.parentId,
+            chunkText: entry.parentText,
+          });
+          completedChunks++;
+          send({ type: "progress", completedChunks, totalChunks: totalChildChunks + parentTexts.length * 2 });
         }
 
         // Update file status to completed
@@ -178,8 +200,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         });
         send({ type: "error", error: "文件处理失败，请重试" });
       } finally {
-        controller.close();
+        if (!streamClosed) {
+          controller.close();
+        }
       }
+    },
+    cancel(reason) {
+      streamClosed = true;
+      console.warn("Upload progress stream cancelled by client:", reason);
     },
   });
 

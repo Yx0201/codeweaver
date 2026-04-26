@@ -2,7 +2,9 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, BookOpen, FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { getKnowledgeGraphData } from "@/lib/knowledge-graph";
 import { prisma } from "@/lib/prisma";
+import { KnowledgeGraphPanel } from "./_components/knowledge-graph-panel";
 import { UploadFileButton } from "./_components/upload-file-button";
 import { FileList } from "./_components/file-list";
 
@@ -29,19 +31,20 @@ export default async function KnowledgeBasePage({ params }: PageProps) {
 
   if (isNaN(knowledgeBaseId)) notFound();
 
-  const [knowledgeBase, files] = await Promise.all([
+  const [knowledgeBase, files, graph] = await Promise.all([
     prisma.knowledge_base.findUnique({ where: { id: knowledgeBaseId } }),
     prisma.uploaded_files.findMany({
       where: { knowledge_base_id: knowledgeBaseId },
       orderBy: { upload_time: "desc" },
     }),
+    getKnowledgeGraphData(knowledgeBaseId),
   ]);
 
   if (!knowledgeBase) notFound();
 
   return (
     <div className="p-6">
-      <div className="max-w-4xl mx-auto">
+      <div className="mx-auto max-w-7xl">
         <div className="flex items-center gap-3 mb-6">
           <Button variant="ghost" size="icon-sm" asChild>
             <Link href="/knowledge">
@@ -57,6 +60,10 @@ export default async function KnowledgeBasePage({ params }: PageProps) {
             {knowledgeBase.description}
           </p>
         )}
+
+        <div className="mb-8">
+          <KnowledgeGraphPanel graph={graph} />
+        </div>
 
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-medium">文件列表</h2>

@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { cleanupKnowledgeGraph } from "@/lib/knowledge-graph";
 import { prisma } from "@/lib/prisma";
 
 export type CreateKnowledgeBaseState = {
@@ -97,6 +98,7 @@ export async function deleteFileAction(
   if (!id) return { error: "无效的文件 ID" };
   try {
     await prisma.uploaded_files.delete({ where: { id } });
+    await cleanupKnowledgeGraph(knowledgeBaseId);
     revalidatePath(`/knowledge/${knowledgeBaseId}`);
     return { success: true };
   } catch {

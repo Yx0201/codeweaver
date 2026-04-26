@@ -7,8 +7,8 @@ import { Progress } from "@/components/ui/progress";
 import { useRouter } from "next/navigation";
 
 interface UploadProgress {
-  totalChunks: number;
-  completedChunks: number;
+  totalSteps: number;
+  completedSteps: number;
   filename: string;
 }
 
@@ -72,20 +72,20 @@ export function UploadFileButton({ knowledgeBaseId }: UploadFileButtonProps) {
 
             if (event.type === "start") {
               setProgress({
-                totalChunks: event.totalChunks,
-                completedChunks: 0,
+                totalSteps: event.totalChunks,
+                completedSteps: 0,
                 filename: file.name,
               });
             } else if (event.type === "progress") {
               setProgress((prev) =>
                 prev
-                  ? { ...prev, completedChunks: event.completedChunks }
+                  ? { ...prev, completedSteps: event.completedChunks }
                   : null
               );
             } else if (event.type === "complete") {
               setProgress((prev) =>
                 prev
-                  ? { ...prev, completedChunks: event.totalChunks }
+                  ? { ...prev, completedSteps: event.totalChunks }
                   : null
               );
             } else if (event.type === "error") {
@@ -108,7 +108,7 @@ export function UploadFileButton({ knowledgeBaseId }: UploadFileButtonProps) {
   };
 
   const percent = progress
-    ? Math.round((progress.completedChunks / progress.totalChunks) * 100)
+    ? Math.round((progress.completedSteps / progress.totalSteps) * 100)
     : 0;
 
   return (
@@ -137,7 +137,7 @@ export function UploadFileButton({ knowledgeBaseId }: UploadFileButtonProps) {
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span className="truncate max-w-[160px]">{progress.filename}</span>
             <span>
-              {progress.completedChunks}/{progress.totalChunks} 分块
+              {progress.completedSteps}/{progress.totalSteps} 步骤
             </span>
           </div>
           <Progress value={percent} className="h-2" />
