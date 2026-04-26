@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate && next build",
     "start": "next start",
+    "postinstall": "prisma generate",
     "lint": "eslint",
     "eval:recall": "packages/rag-eval/venv/bin/python packages/rag-eval/eval_recall.py",
     "setup:python": "bash packages/rag-eval/setup.sh"
