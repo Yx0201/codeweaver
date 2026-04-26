@@ -43,10 +43,10 @@ NEXTJS_BASE_URL = os.environ.get("NEXTJS_BASE_URL", "http://localhost:3000")
 OLLAMA_BASE_URL = os.environ.get("LOCAL_OLLAMA_BASE_URL", "http://localhost:11434")
 EMBEDDING_MODEL = os.environ.get("LOCAL_EMBEDDING_MODEL", "bge-m3:latest")
 
-# External LLM for ragas metric scoring (better quality than local models)
-ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY", "")
-ZHIPU_BASE_URL = os.environ.get("ZHIPU_BASE_URL", "")
-ZHIPU_MODEL_NAME = os.environ.get("ZHIPU_MODEL_NAME", "")
+# External LLM for ragas metric scoring (via Zenmux)
+ZENMUX_API_KEY = os.environ.get("ZENMUX_API_KEY", "")
+ZENMUX_BASE_URL = os.environ.get("ZENMUX_BASE_URL", "https://zenmux.ai/api/v1")
+ZENMUX_MODEL_NAME = os.environ.get("ZENMUX_MODEL_NAME", "")
 
 # Hybrid retrieval Top-K parameters
 VECTOR_TOP_K = int(os.environ.get("VECTOR_TOP_K", "50"))
@@ -252,7 +252,7 @@ async def run_evaluation():
     print("  RAG Recall Evaluation (ragas) — Hybrid Retrieval")
     print("=" * 60)
     print(f"Next.js URL:     {NEXTJS_BASE_URL}")
-    print(f"Scoring LLM:     {ZHIPU_MODEL_NAME} (via {ZHIPU_BASE_URL})")
+    print(f"Scoring LLM:     {ZENMUX_MODEL_NAME} (via Zenmux, base={ZENMUX_BASE_URL})")
     print(f"Eval Embeddings: {EMBEDDING_MODEL} (local Ollama)")
     print(f"Hybrid Top-K:    vector={VECTOR_TOP_K}, keyword={KEYWORD_TOP_K}, final={FINAL_TOP_K}")
     print(f"Golden Dataset:  {len(golden_dataset)} questions")
@@ -305,14 +305,14 @@ async def run_evaluation():
     # 4. Configure ragas: external LLM for scoring, local Ollama for embeddings
     print("[3/3] Running ragas evaluation (this may take a while)...\n")
 
-    if not ZHIPU_API_KEY or not ZHIPU_BASE_URL or not ZHIPU_MODEL_NAME:
-        print("ERROR: ZHIPU_API_KEY, ZHIPU_BASE_URL, ZHIPU_MODEL_NAME must be set in .env.local")
+    if not ZENMUX_API_KEY or not ZENMUX_MODEL_NAME:
+        print("ERROR: ZENMUX_API_KEY, ZENMUX_BASE_URL, ZENMUX_MODEL_NAME must be set in .env.local")
         sys.exit(1)
 
     scoring_llm = ChatOpenAI(
-        model=ZHIPU_MODEL_NAME,
-        api_key=ZHIPU_API_KEY,
-        base_url=ZHIPU_BASE_URL,
+        model=ZENMUX_MODEL_NAME,
+        api_key=ZENMUX_API_KEY,
+        base_url=ZENMUX_BASE_URL,
         temperature=0,
     )
     embeddings = OllamaEmbeddings(
