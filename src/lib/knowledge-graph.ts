@@ -1,5 +1,9 @@
 import { prisma } from "@/lib/prisma";
-import { extractEntitiesAndRelations, type ExtractedEntity, type ExtractedRelation } from "@/lib/graph-extractor";
+import {
+  extractEntitiesAndRelations,
+  type ExtractedEntity,
+  type ExtractedRelation,
+} from "@/lib/graph-extractor";
 import { generateEmbedding } from "@/lib/embedding";
 
 const MAX_GRAPH_NODES = 80;
@@ -93,8 +97,7 @@ async function resolveEntityId(
   if (!normalizedName) return null;
 
   const existing = await prisma.$queryRawUnsafe<{ id: string; description: string | null }[]>(
-    `SELECT id
-            , description
+    `SELECT id, description
      FROM kg_entity
      WHERE knowledge_base_id = $1
        AND entity_type = $2
@@ -149,10 +152,10 @@ async function resolveEntityId(
 
 export async function ingestKnowledgeGraphChunk(params: {
   knowledgeBaseId: number;
-  chunkId: string;
+  graphChunkId: string;
   chunkText: string;
 }): Promise<void> {
-  const { knowledgeBaseId, chunkId, chunkText } = params;
+  const { knowledgeBaseId, graphChunkId, chunkText } = params;
   const extraction = await extractEntitiesAndRelations(chunkText);
   const entities = dedupeEntities(extraction.entities);
   const relations = dedupeRelations(extraction.relations);
@@ -172,13 +175,13 @@ export async function ingestKnowledgeGraphChunk(params: {
       where: {
         entity_id_chunk_id: {
           entity_id: entityId,
-          chunk_id: chunkId,
+          chunk_id: graphChunkId,
         },
       },
       update: {},
       create: {
         entity_id: entityId,
-        chunk_id: chunkId,
+        chunk_id: graphChunkId,
       },
     });
   }
@@ -189,6 +192,24 @@ export async function ingestKnowledgeGraphChunk(params: {
 
     if (!sourceId || !targetId) continue;
 
+    const existingRelation = await prisma.$queryRawUnsafe<{ id: string }[]>(
+      `SELECT id
+       FROM kg_relation
+       WHERE knowledge_base_id = $1
+         AND source_entity_id = $2::uuid
+         AND target_entity_id = $3::uuid
+         AND relation_type = $4
+         AND metadata ->> 'chunk_id' = $5
+       LIMIT 1`,
+      knowledgeBaseId,
+      sourceId,
+      targetId,
+      relation.relation,
+      graphChunkId
+    );
+
+    if (existingRelation[0]?.id) continue;
+
     await prisma.kg_relation.create({
       data: {
         knowledge_base_id: knowledgeBaseId,
@@ -197,7 +218,7 @@ export async function ingestKnowledgeGraphChunk(params: {
         relation_type: relation.relation,
         description: relation.description ?? null,
         metadata: {
-          chunk_id: chunkId,
+          chunk_id: graphChunkId,
         },
       },
     });
@@ -212,9 +233,9 @@ export async function cleanupKnowledgeGraph(knowledgeBaseId: number): Promise<vo
          (r.metadata ->> 'chunk_id') IS NULL
          OR NOT EXISTS (
            SELECT 1
-           FROM document_chunks dc
-           JOIN uploaded_files uf ON uf.id = dc.file_id
-           WHERE dc.id = (r.metadata ->> 'chunk_id')::uuid
+           FROM graph_chunks gc
+           JOIN uploaded_files uf ON uf.id = gc.file_id
+           WHERE gc.id = (r.metadata ->> 'chunk_id')::uuid
              AND uf.knowledge_base_id = $1
          )
        )`,
@@ -227,8 +248,8 @@ export async function cleanupKnowledgeGraph(knowledgeBaseId: number): Promise<vo
        AND NOT EXISTS (
          SELECT 1
          FROM kg_entity_chunk ec
-         JOIN document_chunks dc ON dc.id = ec.chunk_id
-         JOIN uploaded_files uf ON uf.id = dc.file_id
+         JOIN graph_chunks gc ON gc.id = ec.chunk_id
+         JOIN uploaded_files uf ON uf.id = gc.file_id
          WHERE ec.entity_id = e.id
            AND uf.knowledge_base_id = $1
        )`,
@@ -247,16 +268,16 @@ export async function getKnowledgeGraphData(
          SELECT DISTINCT e.id
          FROM kg_entity e
          JOIN kg_entity_chunk ec ON ec.entity_id = e.id
-         JOIN document_chunks dc ON dc.id = ec.chunk_id
-         JOIN uploaded_files uf ON uf.id = dc.file_id
+         JOIN graph_chunks gc ON gc.id = ec.chunk_id
+         JOIN uploaded_files uf ON uf.id = gc.file_id
          WHERE e.knowledge_base_id = $1
            AND uf.knowledge_base_id = $1
        ),
        visible_relations AS (
          SELECT DISTINCT r.id
          FROM kg_relation r
-         JOIN document_chunks dc ON dc.id = (r.metadata ->> 'chunk_id')::uuid
-         JOIN uploaded_files uf ON uf.id = dc.file_id
+         JOIN graph_chunks gc ON gc.id = (r.metadata ->> 'chunk_id')::uuid
+         JOIN uploaded_files uf ON uf.id = gc.file_id
          WHERE r.knowledge_base_id = $1
            AND (r.metadata ->> 'chunk_id') IS NOT NULL
            AND uf.knowledge_base_id = $1
@@ -268,10 +289,9 @@ export async function getKnowledgeGraphData(
          (SELECT COUNT(*)::int FROM visible_relations) AS relation_count,
          (
            SELECT COUNT(*)::int
-           FROM document_chunks dc
-           JOIN uploaded_files uf ON uf.id = dc.file_id
+           FROM graph_chunks gc
+           JOIN uploaded_files uf ON uf.id = gc.file_id
            WHERE uf.knowledge_base_id = $1
-             AND dc.chunk_type = 'parent'
          ) AS chunk_count,
          (
            SELECT COUNT(*)::int
@@ -291,8 +311,8 @@ export async function getKnowledgeGraphData(
          COUNT(DISTINCT ec.chunk_id)::int AS support_count
        FROM kg_entity e
        JOIN kg_entity_chunk ec ON ec.entity_id = e.id
-       JOIN document_chunks dc ON dc.id = ec.chunk_id
-       JOIN uploaded_files uf ON uf.id = dc.file_id
+       JOIN graph_chunks gc ON gc.id = ec.chunk_id
+       JOIN uploaded_files uf ON uf.id = gc.file_id
        WHERE e.knowledge_base_id = $1
          AND uf.knowledge_base_id = $1
        GROUP BY e.id, e.name, e.entity_type, e.description
@@ -324,8 +344,8 @@ export async function getKnowledgeGraphData(
              MIN(r.description) AS description,
              COUNT(*)::int AS occurrence_count
            FROM kg_relation r
-           JOIN document_chunks dc ON dc.id = (r.metadata ->> 'chunk_id')::uuid
-           JOIN uploaded_files uf ON uf.id = dc.file_id
+           JOIN graph_chunks gc ON gc.id = (r.metadata ->> 'chunk_id')::uuid
+           JOIN uploaded_files uf ON uf.id = gc.file_id
            WHERE r.knowledge_base_id = $1
              AND (r.metadata ->> 'chunk_id') IS NOT NULL
              AND uf.knowledge_base_id = $1

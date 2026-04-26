@@ -16,6 +16,11 @@ function formatFileSize(bytes: bigint | null): string {
   return `${(size / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function normalizePreviewText(text: string | null): string | null {
+  if (!text) return text;
+  return text.replace(/\r\n?/g, "\n");
+}
+
 export default async function FilePreviewPage({ params }: PageProps) {
   const { id, fileId } = await params;
 
@@ -40,6 +45,7 @@ export default async function FilePreviewPage({ params }: PageProps) {
   const isPdf = mimeType === "application/pdf";
   const isImage = mimeType.startsWith("image/");
   const hasData = !!file.file_data;
+  const previewContent = normalizePreviewText(file.content);
 
   return (
     <div className="p-6 h-full flex flex-col">
@@ -81,13 +87,13 @@ export default async function FilePreviewPage({ params }: PageProps) {
                 className="max-w-full max-h-full object-contain rounded"
               />
             </div>
-          ) : isText && file.content ? (
+          ) : isText && previewContent ? (
             <pre className="h-full overflow-auto p-4 text-sm font-mono whitespace-pre-wrap break-words leading-relaxed">
-              {file.content}
+              {previewContent}
             </pre>
-          ) : file.content ? (
+          ) : previewContent ? (
             <pre className="h-full overflow-auto p-4 text-sm font-mono whitespace-pre-wrap break-words leading-relaxed">
-              {file.content}
+              {previewContent}
             </pre>
           ) : (
             <div className="flex flex-col items-center justify-center h-full text-muted-foreground gap-2">

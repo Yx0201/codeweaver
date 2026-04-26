@@ -39,7 +39,7 @@ export async function graphSearch(
   const rows = await prisma.$queryRawUnsafe<
     { id: string; chunk_text: string; metadata: unknown }[]
   >(
-    `SELECT id, chunk_text, metadata FROM document_chunks WHERE id = ANY($1::uuid[])`,
+    `SELECT id, chunk_text, metadata FROM graph_chunks WHERE id = ANY($1::uuid[])`,
     chunkIds
   );
 
@@ -70,10 +70,11 @@ async function findMatchingEntities(
     const keywordRows = await prisma.$queryRawUnsafe<{ id: string }[]>(
       `SELECT id FROM kg_entity
        WHERE knowledge_base_id = $1
-       AND (name ILIKE $2 OR name_keywords @@ plainto_tsquery('jiebacfg', $2))
+       AND (name ILIKE $2 OR name_keywords @@ plainto_tsquery('jiebacfg', $3))
        LIMIT 5`,
       knowledgeBaseId,
-      `%${name}%`
+      `%${name}%`,
+      name
     );
     for (const row of keywordRows) entityIds.add(row.id);
 

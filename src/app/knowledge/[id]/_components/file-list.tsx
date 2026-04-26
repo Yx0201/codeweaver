@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { deleteFileAction } from "@/actions/knowledge";
+import type { UploadPipelineState } from "@/lib/upload-processing";
 
 interface FileItem {
   id: string;
@@ -22,6 +23,7 @@ interface FileItem {
   fileSize: string;
   uploadTime: string;
   status: string | null;
+  process: UploadPipelineState | null;
 }
 
 interface FileListProps {
@@ -29,13 +31,29 @@ interface FileListProps {
   knowledgeBaseId: number;
 }
 
-function StatusLabel({ status }: { status: string | null }) {
+function StatusLabel({
+  status,
+  process,
+}: {
+  status: string | null;
+  process: UploadPipelineState | null;
+}) {
   if (status === "completed")
     return <span className="text-green-600">已完成</span>;
   if (status === "processing")
-    return <span className="text-yellow-600">处理中</span>;
+    return (
+      <span className="text-yellow-600">
+        {process
+          ? `${process.steps.find((step) => step.status === "running")?.label ?? "处理中"} · ${process.totalPercent}%`
+          : "处理中"}
+      </span>
+    );
   if (status === "failed")
-    return <span className="text-destructive">处理失败</span>;
+    return (
+      <span className="text-destructive">
+        {process?.error ? `处理失败 · ${process.error}` : "处理失败"}
+      </span>
+    );
   return <span className="text-muted-foreground">已上传</span>;
 }
 
@@ -118,7 +136,7 @@ export function FileList({ files, knowledgeBaseId }: FileListProps) {
               <p className="font-medium truncate hover:underline">{file.filename}</p>
               <p className="text-xs text-muted-foreground">
                 {file.fileSize} · {file.uploadTime} ·{" "}
-                <StatusLabel status={file.status} />
+                <StatusLabel status={file.status} process={file.process} />
               </p>
             </Link>
             <DeleteFileDialog file={file} knowledgeBaseId={knowledgeBaseId} />

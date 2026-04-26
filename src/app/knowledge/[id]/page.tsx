@@ -4,6 +4,7 @@ import { ArrowLeft, BookOpen, FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getKnowledgeGraphData } from "@/lib/knowledge-graph";
 import { prisma } from "@/lib/prisma";
+import { parseUploadPipelineState } from "@/lib/upload-processing";
 import { KnowledgeGraphPanel } from "./_components/knowledge-graph-panel";
 import { UploadFileButton } from "./_components/upload-file-button";
 import { FileList } from "./_components/file-list";
@@ -84,6 +85,7 @@ export default async function KnowledgeBasePage({ params }: PageProps) {
               fileSize: formatFileSize(f.file_size),
               uploadTime: formatDate(f.upload_time),
               status: f.status,
+              process: parseUploadPipelineState(f.metadata),
             }))}
           />
         )}

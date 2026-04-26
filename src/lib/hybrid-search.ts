@@ -1,9 +1,7 @@
-import { vectorSearch, type SearchResult as VectorSearchResult } from "@/lib/vector-search";
-import { keywordSearch, type KeywordSearchResult } from "@/lib/keyword-search";
-import { graphSearch, type GraphSearchResult } from "@/lib/graph-search";
+import { vectorSearch } from "@/lib/vector-search";
+import { keywordSearch } from "@/lib/keyword-search";
 import { rerank } from "@/lib/reranker";
 import { rewriteQuery, type RewriteMode } from "@/lib/query-rewriter";
-import { generateEmbedding } from "@/lib/embedding";
 import { prisma } from "@/lib/prisma";
 import { RRF_K, DEFAULT_VECTOR_TOP_K, DEFAULT_KEYWORD_TOP_K, DEFAULT_FUSION_TOP_K, DEFAULT_RERANKER_TOP_K, DEFAULT_FINAL_TOP_K } from "@/lib/config";
 
@@ -18,12 +16,10 @@ export interface HybridSearchResult {
 export interface HybridSearchOptions {
   vectorTopK?: number;
   keywordTopK?: number;
-  graphTopK?: number;
   fusionTopK?: number;
   rerankerTopK?: number;
   finalTopK?: number;
   useReranker?: boolean;
-  useGraph?: boolean;
   queryRewriteMode?: RewriteMode;
 }
 
@@ -34,22 +30,22 @@ export interface HybridSearchOptions {
  * where k is a smoothing constant (default 60).
  */
 function reciprocalRankFusion(
-  resultLists: Array<{ results: { chunk_text: string; metadata?: unknown }[]; label: "vector" | "keyword" | "graph" }>,
+  resultLists: Array<{ results: { chunk_text: string; metadata?: unknown }[]; label: "vector" | "keyword" }>,
   k: number = RRF_K
-): Map<string, { score: number; sources: Set<"vector" | "keyword" | "graph">; metadata: unknown }> {
+): Map<string, { score: number; sources: Set<"vector" | "keyword">; metadata: unknown }> {
   const scores = new Map<
     string,
-    { score: number; sources: Set<"vector" | "keyword" | "graph">; metadata: unknown }
+    { score: number; sources: Set<"vector" | "keyword">; metadata: unknown }
   >();
 
   for (const { results, label } of resultLists) {
     results.forEach((r, rank) => {
-      const key = r.chunk_text;
-      const existing = scores.get(key) ?? {
-        score: 0,
-        sources: new Set<"vector" | "keyword" | "graph">(),
-        metadata: r.metadata,
-      };
+        const key = r.chunk_text;
+        const existing = scores.get(key) ?? {
+          score: 0,
+          sources: new Set<"vector" | "keyword">(),
+          metadata: r.metadata,
+        };
       existing.score += 1 / (k + rank + 1);
       existing.sources.add(label);
       scores.set(key, existing);
@@ -76,9 +72,7 @@ export async function hybridSearch(
   const {
     fusionTopK = DEFAULT_FUSION_TOP_K,
     rerankerTopK = DEFAULT_RERANKER_TOP_K,
-    graphTopK = 10,
     useReranker = false,
-    useGraph = false,
     queryRewriteMode,
   } = options;
 
@@ -103,7 +97,7 @@ export async function hybridSearch(
     }
   }
 
-  // Run searches in parallel (vector + keyword, optionally graph)
+  // Run searches in parallel (vector + keyword)
   const searchPromises = [
     vectorSearch(vectorQuery, knowledgeBaseId, vectorTopK),
     keywordSearch(keywordQuery, knowledgeBaseId, keywordTopK),
@@ -111,24 +105,10 @@ export async function hybridSearch(
 
   const [vectorResults, keywordResults] = await Promise.all(searchPromises);
 
-  // Optional: graph search (runs in parallel if enabled)
-  let graphResults: GraphSearchResult[] = [];
-  if (useGraph) {
-    try {
-      graphResults = await graphSearch(query, knowledgeBaseId, graphTopK);
-    } catch (err) {
-      console.error("Graph search failed, skipping:", err);
-    }
-  }
-
-  // Fuse with RRF (2-way or 3-way depending on graph)
-  const resultLists: Array<{ results: { chunk_text: string; metadata?: unknown }[]; label: "vector" | "keyword" | "graph" }> = [
+  const resultLists: Array<{ results: { chunk_text: string; metadata?: unknown }[]; label: "vector" | "keyword" }> = [
     { results: vectorResults, label: "vector" },
     { results: keywordResults, label: "keyword" },
   ];
-  if (graphResults.length > 0) {
-    resultLists.push({ results: graphResults, label: "graph" });
-  }
 
   const fused = reciprocalRankFusion(resultLists);
 
@@ -142,7 +122,7 @@ export async function hybridSearch(
     ([chunk_text, { score, sources, metadata }]) => ({
       chunk_text,
       score,
-      source: sources.size > 1 ? "both" : ([...sources][0] as "vector" | "keyword" | "graph"),
+      source: sources.size > 1 ? "both" : ([...sources][0] as "vector" | "keyword"),
       metadata: metadata ?? null,
     })
   );
@@ -199,7 +179,7 @@ async function expandSearch(
   );
 
   // Merge all results into a single RRF fusion
-  const resultLists: Array<{ results: { chunk_text: string; metadata?: unknown }[]; label: "vector" | "keyword" | "graph" }> = [];
+  const resultLists: Array<{ results: { chunk_text: string; metadata?: unknown }[]; label: "vector" | "keyword" }> = [];
   for (const { vec, kw } of allResults) {
     resultLists.push({ results: vec, label: "vector" });
     resultLists.push({ results: kw, label: "keyword" });
@@ -214,7 +194,7 @@ async function expandSearch(
     ([chunk_text, { score, sources, metadata }]) => ({
       chunk_text,
       score,
-      source: sources.size > 1 ? "both" : ([...sources][0] as "vector" | "keyword" | "graph"),
+      source: sources.size > 1 ? "both" : ([...sources][0] as "vector" | "keyword"),
       metadata: metadata ?? null,
     })
   );

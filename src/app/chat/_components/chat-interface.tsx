@@ -132,8 +132,7 @@ export function ChatInterface({
         vectorTopK: 20,
         keywordTopK: 20,
         finalTopK: 10,
-        useReranker: searchMode === "hybrid",
-        useGraph: searchMode === "graph",
+        searchMode,
       }),
     });
 

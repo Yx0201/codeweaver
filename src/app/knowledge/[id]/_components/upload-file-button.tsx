@@ -1,41 +1,92 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { Upload } from "lucide-react";
+import { useRef, useState } from "react";
+import { CheckCircle2, Clock3, Loader2, Upload, XCircle } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { useRouter } from "next/navigation";
-
-interface UploadProgress {
-  totalSteps: number;
-  completedSteps: number;
-  filename: string;
-}
+import type { UploadPipelineState, UploadPipelineStep } from "@/lib/upload-processing";
 
 interface UploadFileButtonProps {
   knowledgeBaseId: number;
 }
 
-type StreamEvent =
-  | { type: "start"; totalChunks: number }
-  | { type: "progress"; completedChunks: number; totalChunks: number }
-  | { type: "complete"; fileId: string; totalChunks: number }
-  | { type: "error"; error: string };
+interface UploadSession {
+  fileId: string;
+  filename: string;
+  status: string;
+  process: UploadPipelineState | null;
+}
+
+function StepIcon({ step }: { step: UploadPipelineStep }) {
+  if (step.status === "completed") {
+    return <CheckCircle2 className="size-4 text-green-600" />;
+  }
+  if (step.status === "failed") {
+    return <XCircle className="size-4 text-destructive" />;
+  }
+  if (step.status === "running") {
+    return <Loader2 className="size-4 animate-spin text-primary" />;
+  }
+  return <Clock3 className="size-4 text-muted-foreground" />;
+}
 
 export function UploadFileButton({ knowledgeBaseId }: UploadFileButtonProps) {
-  const [uploading, setUploading] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [progress, setProgress] = useState<UploadProgress | null>(null);
+  const [session, setSession] = useState<UploadSession | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+
+  const processFile = async (fileId: string) => {
+    let done = false;
+
+    while (!done) {
+      const res = await fetch(
+        `/api/knowledge/${knowledgeBaseId}/files/${fileId}/process`,
+        { method: "POST" }
+      );
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok || !data) {
+        throw new Error(data?.error ?? "文件处理失败");
+      }
+
+      setSession((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: data.status,
+              process: data.process,
+            }
+          : {
+              fileId,
+              filename: data.filename ?? "处理中",
+              status: data.status,
+              process: data.process,
+            }
+      );
+
+      if (data.status === "completed") {
+        done = true;
+        break;
+      }
+
+      if (data.status === "failed") {
+        throw new Error(data.error ?? "文件处理失败");
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  };
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setUploading(true);
+    setBusy(true);
     setError(null);
-    setProgress(null);
+    setSession(null);
 
     try {
       const formData = new FormData();
@@ -45,74 +96,49 @@ export function UploadFileButton({ knowledgeBaseId }: UploadFileButtonProps) {
         method: "POST",
         body: formData,
       });
+      const data = await res.json().catch(() => null);
 
-      if (!res.ok || !res.body) {
-        const data = await res.json().catch(() => ({ error: "上传失败" }));
-        setError(data.error ?? "上传失败");
-        return;
+      if (!res.ok || !data?.fileId) {
+        throw new Error(data?.error ?? "上传失败");
       }
 
-      // Read NDJSON stream for progress updates
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const event = JSON.parse(line) as StreamEvent;
-
-            if (event.type === "start") {
-              setProgress({
-                totalSteps: event.totalChunks,
-                completedSteps: 0,
-                filename: file.name,
-              });
-            } else if (event.type === "progress") {
-              setProgress((prev) =>
-                prev
-                  ? { ...prev, completedSteps: event.completedChunks }
-                  : null
-              );
-            } else if (event.type === "complete") {
-              setProgress((prev) =>
-                prev
-                  ? { ...prev, completedSteps: event.totalChunks }
-                  : null
-              );
-            } else if (event.type === "error") {
-              setError(event.error);
-            }
-          } catch {
-            // Skip malformed JSON lines
-          }
-        }
-      }
+      setSession({
+        fileId: data.fileId,
+        filename: data.filename ?? file.name,
+        status: data.status,
+        process: data.process,
+      });
 
       router.refresh();
-    } catch {
-      setError("上传失败，请重试");
+      await processFile(data.fileId);
+      router.refresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "上传失败，请重试";
+      setError(message);
+      setSession((prev) =>
+        prev
+          ? {
+              ...prev,
+              status: "failed",
+              process: prev.process
+                ? { ...prev.process, error: message }
+                : null,
+            }
+          : prev
+      );
     } finally {
-      setUploading(false);
-      setTimeout(() => setProgress(null), 1500);
+      setBusy(false);
       if (inputRef.current) inputRef.current.value = "";
     }
   };
 
-  const percent = progress
-    ? Math.round((progress.completedSteps / progress.totalSteps) * 100)
-    : 0;
+  const currentStep =
+    session?.process?.steps.find((step) => step.status === "running") ??
+    session?.process?.steps.find((step) => step.status === "failed") ??
+    null;
 
   return (
-    <div className="flex flex-col gap-2 items-end">
+    <div className="flex w-full max-w-md flex-col gap-3 items-end">
       <div className="flex items-center gap-2">
         <input
           ref={inputRef}
@@ -120,34 +146,77 @@ export function UploadFileButton({ knowledgeBaseId }: UploadFileButtonProps) {
           accept=".txt,.md,.markdown"
           className="hidden"
           onChange={handleUpload}
-          disabled={uploading}
+          disabled={busy}
         />
         <Button
           onClick={() => inputRef.current?.click()}
-          disabled={uploading}
+          disabled={busy}
           size="sm"
         >
           <Upload data-icon="inline-start" className="size-4" />
-          上传文件
+          {busy ? "处理中..." : "上传文件"}
         </Button>
       </div>
 
-      {progress && (
-        <div className="w-64 flex flex-col gap-1.5">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span className="truncate max-w-[160px]">{progress.filename}</span>
-            <span>
-              {progress.completedSteps}/{progress.totalSteps} 步骤
-            </span>
+      {session?.process && (
+        <div className="w-full rounded-2xl border bg-card p-4 shadow-sm">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{session.filename}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {session.process.currentStageIndex}/{session.process.totalStages} 步
+                {currentStep ? ` · 当前：${currentStep.label}` : ""}
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-lg font-semibold">{session.process.totalPercent}%</p>
+              <p className="text-xs text-muted-foreground">
+                {session.status === "completed"
+                  ? "全部完成"
+                  : session.status === "failed"
+                    ? "处理失败"
+                    : "后台处理中"}
+              </p>
+            </div>
           </div>
-          <Progress value={percent} className="h-2" />
-          <span className="text-xs text-muted-foreground text-right">
-            {percent}%
-          </span>
+
+          <Progress value={session.process.totalPercent} className="mt-3 h-2.5" />
+
+          <div className="mt-4 space-y-3">
+            {session.process.steps.map((step) => (
+              <div key={step.key} className="space-y-1.5">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <StepIcon step={step} />
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">{step.label}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {step.description}
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-xs text-muted-foreground">{step.progress}%</span>
+                </div>
+                <Progress value={step.progress} className="h-1.5" />
+              </div>
+            ))}
+          </div>
+
+          {session.process.error && (
+            <p className="mt-3 text-sm text-destructive">{session.process.error}</p>
+          )}
+
+          {session.status === "completed" && (
+            <p className="mt-3 text-sm text-green-600">
+              文件已经处理完成，可以开始检索与对话了。
+            </p>
+          )}
         </div>
       )}
 
-      {error && <p className="text-sm text-destructive">{error}</p>}
+      {error && !session?.process?.error && (
+        <p className="text-sm text-destructive">{error}</p>
+      )}
     </div>
   );
 }

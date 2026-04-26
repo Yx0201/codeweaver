@@ -1,10 +1,10 @@
 import { streamText, generateText } from "ai";
 import model from "@/register/model";
-import { hybridSearch, type HybridSearchOptions } from "@/lib/hybrid-search";
 import { buildRagSystemPrompt } from "@/lib/rag-service";
 import { prisma } from "@/lib/prisma";
 import { DEFAULT_VECTOR_TOP_K, DEFAULT_KEYWORD_TOP_K, DEFAULT_FINAL_TOP_K } from "@/lib/config";
 import type { RewriteMode } from "@/lib/query-rewriter";
+import { searchKnowledgeBase, type RetrievalMode } from "@/lib/search-service";
 
 export const maxDuration = 60;
 
@@ -64,11 +64,10 @@ export async function POST(req: Request) {
     vectorTopK,
     keywordTopK,
     finalTopK,
-    useReranker,
     rerankerTopK,
     fusionTopK,
     queryRewriteMode,
-    useGraph,
+    searchMode = "hybrid",
   }: {
     messages: ChatMessageInput[];
     knowledgeBaseId?: number;
@@ -78,25 +77,16 @@ export async function POST(req: Request) {
     vectorTopK?: number;
     keywordTopK?: number;
     finalTopK?: number;
-    useReranker?: boolean;
     rerankerTopK?: number;
     fusionTopK?: number;
     queryRewriteMode?: RewriteMode;
-    useGraph?: boolean;
+    searchMode?: RetrievalMode;
   } = await req.json();
 
   // --- Resolve system prompt ---
   // Priority: providedSystemPrompt > build from knowledgeBaseId
   let systemPrompt: string | undefined = providedSystemPrompt;
   let retrievedContexts: string[] = [];
-
-  const searchOptions: HybridSearchOptions = {
-    useReranker: useReranker ?? true,
-    rerankerTopK,
-    fusionTopK,
-    queryRewriteMode,
-    useGraph: useGraph ?? false,
-  };
 
   if (!systemPrompt && knowledgeBaseId) {
     const lastUserMessage = [...messages]
@@ -105,13 +95,18 @@ export async function POST(req: Request) {
     const query = lastUserMessage ? extractMessageText(lastUserMessage) : "";
 
     if (query) {
-      const results = await hybridSearch(
+      const results = await searchKnowledgeBase(
         query,
         knowledgeBaseId,
-        vectorTopK ?? DEFAULT_VECTOR_TOP_K,
-        keywordTopK ?? DEFAULT_KEYWORD_TOP_K,
-        finalTopK ?? DEFAULT_FINAL_TOP_K,
-        searchOptions
+        searchMode,
+        {
+          vectorTopK: vectorTopK ?? DEFAULT_VECTOR_TOP_K,
+          keywordTopK: keywordTopK ?? DEFAULT_KEYWORD_TOP_K,
+          finalTopK: finalTopK ?? DEFAULT_FINAL_TOP_K,
+          rerankerTopK,
+          fusionTopK,
+          queryRewriteMode,
+        }
       );
       retrievedContexts = results.map((r) => r.chunk_text);
       if (results.length > 0) {
@@ -125,13 +120,18 @@ export async function POST(req: Request) {
     const query = lastUserMessage ? extractMessageText(lastUserMessage) : "";
 
     if (query) {
-      const results = await hybridSearch(
+      const results = await searchKnowledgeBase(
         query,
         knowledgeBaseId,
-        vectorTopK ?? DEFAULT_VECTOR_TOP_K,
-        keywordTopK ?? DEFAULT_KEYWORD_TOP_K,
-        finalTopK ?? DEFAULT_FINAL_TOP_K,
-        searchOptions
+        searchMode,
+        {
+          vectorTopK: vectorTopK ?? DEFAULT_VECTOR_TOP_K,
+          keywordTopK: keywordTopK ?? DEFAULT_KEYWORD_TOP_K,
+          finalTopK: finalTopK ?? DEFAULT_FINAL_TOP_K,
+          rerankerTopK,
+          fusionTopK,
+          queryRewriteMode,
+        }
       );
       retrievedContexts = results.map((r) => r.chunk_text);
     }
