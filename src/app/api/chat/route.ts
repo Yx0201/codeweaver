@@ -1,5 +1,5 @@
 import { streamText, generateText } from "ai";
-import model from "@/register/model";
+import { chatModel } from "@/register/model";
 import { buildRagSystemPrompt } from "@/lib/rag-service";
 import { prisma } from "@/lib/prisma";
 import { DEFAULT_VECTOR_TOP_K, DEFAULT_KEYWORD_TOP_K, DEFAULT_FINAL_TOP_K } from "@/lib/config";
@@ -140,7 +140,7 @@ export async function POST(req: Request) {
   // --- Eval mode: non-streaming JSON response ---
   if (mode === "eval") {
     const result = await generateText({
-      model,
+      model: chatModel,
       system: systemPrompt,
       messages: normalizeMessages(messages),
     });
@@ -172,7 +172,7 @@ export async function POST(req: Request) {
   }
 
   const result = streamText({
-    model,
+    model: chatModel,
     system: systemPrompt,
     messages: normalizeMessages(messages),
     onFinish: async ({ response }) => {

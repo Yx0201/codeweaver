@@ -13,6 +13,21 @@ export const RERANKER_URL =
 // --- Model names ---
 export const EMBEDDING_MODEL = "bge-m3:latest";
 export const RERANKER_MODEL = "BAAI/bge-reranker-v2-m3";
+export const GRAPH_EXTRACT_MODEL =
+  process.env.LOCAL_GRAPH_EXTRACT_MODEL ?? "qwen3.5:4b";
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const value = process.env[name];
+  if (!value) return fallback;
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export const GRAPH_BUILD_CONCURRENCY = readPositiveIntEnv(
+  "LOCAL_GRAPH_BUILD_CONCURRENCY",
+  2
+);
 
 // --- Default Top-K parameters ---
 export const DEFAULT_VECTOR_TOP_K = 50;

@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@/generated/prisma/client";
 import { generateEmbeddings } from "@/lib/embedding";
-import { cleanupKnowledgeGraph, ingestKnowledgeGraphChunk } from "@/lib/knowledge-graph";
+import { GRAPH_BUILD_CONCURRENCY } from "@/lib/config";
+import {
+  cleanupKnowledgeGraph,
+  prepareKnowledgeGraphChunkIngestion,
+  writeKnowledgeGraphChunkIngestion,
+  type KnowledgeGraphChunkIngestion,
+} from "@/lib/knowledge-graph";
 import { buildNovelGraphChunks, buildNovelRetrievalChunks } from "@/lib/novel-chunking";
 import { prisma } from "@/lib/prisma";
 import {
@@ -17,7 +23,6 @@ import {
 export const maxDuration = 60;
 
 const EMBEDDING_BATCH_SIZE = 8;
-const GRAPH_BATCH_SIZE = 2;
 
 interface RouteParams {
   params: Promise<{ id: string; fileId: string }>;
@@ -257,21 +262,39 @@ async function runGraphBuildStage(
      ORDER BY chunk_order ASC
      LIMIT $2`,
     fileId,
-    GRAPH_BATCH_SIZE
+    GRAPH_BUILD_CONCURRENCY
   );
 
-  for (const row of rows) {
-    let graphError: string | null = null;
+  const extractedRows = await Promise.all(
+    rows.map(async (row) => {
+      let graphError: string | null = null;
+      let extraction: KnowledgeGraphChunkIngestion | null = null;
 
+      try {
+        extraction = await prepareKnowledgeGraphChunkIngestion(row.chunk_text);
+      } catch (error) {
+        graphError = error instanceof Error ? error.message : "未知图谱构建错误";
+        console.warn(`Graph chunk extraction skipped for ${row.id}: ${graphError}`);
+      }
+
+      return { row, extraction, graphError };
+    })
+  );
+
+  // Keep database writes serial so concurrent extraction cannot create duplicate entities.
+  for (const { row, extraction, graphError: extractionError } of extractedRows) {
+    let graphError = extractionError;
     try {
-      await ingestKnowledgeGraphChunk({
-        knowledgeBaseId,
-        graphChunkId: row.id,
-        chunkText: row.chunk_text,
-      });
+      if (extraction) {
+        await writeKnowledgeGraphChunkIngestion({
+          knowledgeBaseId,
+          graphChunkId: row.id,
+          extraction,
+        });
+      }
     } catch (error) {
       graphError = error instanceof Error ? error.message : "未知图谱构建错误";
-      console.warn(`Graph chunk extraction skipped for ${row.id}: ${graphError}`);
+      console.warn(`Graph chunk ingestion skipped for ${row.id}: ${graphError}`);
     }
 
     await prisma.$executeRawUnsafe(

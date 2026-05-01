@@ -79,6 +79,10 @@ export function ChatInterface({
     conversationIdRef.current = conversationId;
   }, [conversationId]);
 
+  const submittingRef = useRef(false);
+  const lastSubmittedTextRef = useRef<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Store the last system prompt for regenerate
   const lastSystemPromptRef = useRef<string | undefined>(undefined);
 
@@ -108,10 +112,16 @@ export function ChatInterface({
     persistSettings({ searchMode: value });
   };
 
-  const { messages, sendMessage, status, regenerate } = useChat({
+  const { messages, sendMessage, status, regenerate, stop } = useChat({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     messages: initialMessages as any,
   });
+
+  useEffect(() => {
+    if (status === "ready" || status === "error") {
+      lastSubmittedTextRef.current = null;
+    }
+  }, [status]);
 
   /**
    * Run the RAG pipeline: vector search → system prompt.
@@ -159,40 +169,64 @@ export function ChatInterface({
   };
 
   const handleSubmit = async (message: PromptInputMessage) => {
-    if (!message.text.trim()) return;
+    const text = message.text.trim();
+    if (!text) return;
+
+    const hasActiveResponse = status === "submitted" || status === "streaming";
+    if (
+      lastSubmittedTextRef.current === text &&
+      (submittingRef.current || hasActiveResponse)
+    ) {
+      return;
+    }
+
+    submittingRef.current = true;
+    lastSubmittedTextRef.current = text;
+    setIsSubmitting(true);
+    setInput("");
+
+    if (hasActiveResponse) {
+      stop();
+    }
 
     let convId = conversationIdRef.current;
 
-    // First message in a new conversation: create the conversation record first
-    if (!convId) {
-      const conv = await createConversation(kbId, searchMode);
-      convId = conv.id;
-      conversationIdRef.current = convId;
-      // Notify parent: updates URL + starts title generation (non-blocking)
-      onConversationCreated(convId, message.text);
-    }
-
-    // Pre-fetch RAG context (vector search + system prompt) if KB is selected
-    let systemPrompt: string | undefined;
-    if (kbId) {
-      systemPrompt = await fetchRagContext(message.text, kbId);
-      lastSystemPromptRef.current = systemPrompt;
-    } else {
-      lastSystemPromptRef.current = undefined;
-    }
-
-    sendMessage(
-      { text: message.text },
-      {
-        body: {
-          conversationId: convId,
-          ...(kbId ? { knowledgeBaseId: kbId } : {}),
-          ...(systemPrompt ? { systemPrompt } : {}),
-          searchMode,
-        },
+    try {
+      // First message in a new conversation: create the conversation record first
+      if (!convId) {
+        const conv = await createConversation(kbId, searchMode);
+        convId = conv.id;
+        conversationIdRef.current = convId;
+        // Notify parent: updates URL + starts title generation (non-blocking)
+        onConversationCreated(convId, text);
       }
-    );
-    setInput("");
+
+      // Pre-fetch RAG context (vector search + system prompt) if KB is selected
+      let systemPrompt: string | undefined;
+      if (kbId) {
+        systemPrompt = await fetchRagContext(text, kbId);
+        lastSystemPromptRef.current = systemPrompt;
+      } else {
+        lastSystemPromptRef.current = undefined;
+      }
+
+      void sendMessage(
+        { text },
+        {
+          body: {
+            conversationId: convId,
+            ...(kbId ? { knowledgeBaseId: kbId } : {}),
+            ...(systemPrompt ? { systemPrompt } : {}),
+            searchMode,
+          },
+        }
+      ).catch((error) => {
+        console.error("Chat send failed:", error);
+      });
+    } finally {
+      submittingRef.current = false;
+      setIsSubmitting(false);
+    }
   };
 
   const handleRegenerate = () => {
@@ -317,8 +351,7 @@ export function ChatInterface({
               className="pr-12"
             />
             <PromptInputSubmit
-              status={status === "streaming" ? "streaming" : "ready"}
-              disabled={!input.trim()}
+              disabled={isSubmitting || !input.trim()}
               className="absolute bottom-1 right-1"
             />
           </PromptInput>

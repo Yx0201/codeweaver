@@ -37,6 +37,11 @@ export interface KnowledgeGraphData {
   };
 }
 
+export interface KnowledgeGraphChunkIngestion {
+  entities: ExtractedEntity[];
+  relations: ExtractedRelation[];
+}
+
 function normalizeName(name: string): string {
   return name.replace(/\s+/g, " ").trim();
 }
@@ -156,9 +161,33 @@ export async function ingestKnowledgeGraphChunk(params: {
   chunkText: string;
 }): Promise<void> {
   const { knowledgeBaseId, graphChunkId, chunkText } = params;
+  const extraction = await prepareKnowledgeGraphChunkIngestion(chunkText);
+
+  await writeKnowledgeGraphChunkIngestion({
+    knowledgeBaseId,
+    graphChunkId,
+    extraction,
+  });
+}
+
+export async function prepareKnowledgeGraphChunkIngestion(
+  chunkText: string
+): Promise<KnowledgeGraphChunkIngestion> {
   const extraction = await extractEntitiesAndRelations(chunkText);
-  const entities = dedupeEntities(extraction.entities);
-  const relations = dedupeRelations(extraction.relations);
+
+  return {
+    entities: dedupeEntities(extraction.entities),
+    relations: dedupeRelations(extraction.relations),
+  };
+}
+
+export async function writeKnowledgeGraphChunkIngestion(params: {
+  knowledgeBaseId: number;
+  graphChunkId: string;
+  extraction: KnowledgeGraphChunkIngestion;
+}): Promise<void> {
+  const { knowledgeBaseId, graphChunkId, extraction } = params;
+  const { entities, relations } = extraction;
 
   if (entities.length === 0 && relations.length === 0) {
     return;
