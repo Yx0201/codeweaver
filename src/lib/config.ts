@@ -29,7 +29,7 @@ export const GRAPH_BUILD_CONCURRENCY = readPositiveIntEnv(
   2
 );
 
-// --- Default Top-K parameters ---
+// --- Default Top-K parameters  ---
 export const DEFAULT_VECTOR_TOP_K = 50;
 export const DEFAULT_KEYWORD_TOP_K = 50;
 export const DEFAULT_FUSION_TOP_K = 30;
