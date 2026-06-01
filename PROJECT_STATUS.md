@@ -160,7 +160,7 @@ brew services start postgresql@17
 ```bash
 ollama pull bge-m3:latest          # 嵌入模型 (1024维)
 ollama pull qwen3:0.6b             # 查询改写 (轻量快速)
-ollama pull qcwind/qwen3-8b-instruct-Q4-K-M:latest  # 主对话模型 + 实体抽取
+ollama pull qcwind/qwen3.5:9b  # 主对话模型 + 实体抽取
 ```
 
 ### 4.3 Reranker 服务
@@ -366,7 +366,7 @@ DATABASE_URL=postgresql://bbimasheep:@localhost:5432/knowledge_db?schema=public
 
 # Ollama
 LOCAL_MODEL_BASE_URL=http://localhost:11434/api
-LOCAL_MODEL_SIGNAL=qcwind/qwen3-8b-instruct-Q4-K-M:latest
+LOCAL_MODEL_SIGNAL=qcwind/qwen3.5:9b
 LOCAL_EMBEDDING_MODEL=bge-m3:latest
 LOCAL_OLLAMA_BASE_URL=http://localhost:11434
 

@@ -1,4 +1,4 @@
-import { RERANKER_URL } from "./config";
+import { RERANKER_URL, RERANKER_MODEL } from "./config";
 
 export interface RerankResult {
   index: number;
@@ -28,7 +28,7 @@ export async function rerank(
         query,
         documents,
         top_n: topK,
-        model: "BAAI/bge-reranker-v2-m3",
+        model: RERANKER_MODEL,
       }),
       signal: AbortSignal.timeout(30_000), // 30s timeout (Rosetta emulation is slow)
     });

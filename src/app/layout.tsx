@@ -1,17 +1,20 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { Geist } from "next/font/google";
+import { Geist, Geist_Mono } from "next/font/google";
 import { cn } from "@/lib/utils";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { Header } from "@/components/layout/header";
+import { ThemeProvider, themeInitScript } from "@/components/theme/theme-provider";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
+const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono" });
 
 export const metadata: Metadata = {
-  title: "CodeWeaver",
-  description: "A Ai Native Application Framework",
+  title: "CodeWeaver — knowledge graph chat",
+  description:
+    "Retrieval-augmented chat over your documents, with an interactive knowledge graph.",
 };
 
 export default function RootLayout({
@@ -21,21 +24,41 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      lang="en"
-      className={cn("h-full antialiased", "font-sans", geist.variable)}
+      lang="zh-CN"
+      suppressHydrationWarning
+      className={cn(
+        "h-full antialiased",
+        "font-sans",
+        geist.variable,
+        geistMono.variable
+      )}
     >
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
+      </head>
       <body className="h-full flex flex-col overflow-hidden bg-sidebar">
-        <TooltipProvider>
-          <SidebarProvider>
-            <AppSidebar />
-            <SidebarInset className="mt-2 mr-2 mb-2 border rounded-lg border-border bg-popover">
-              <Header />
-              <main className="flex-1 overflow-auto flex flex-col">
-                {children}
-              </main>
-            </SidebarInset>
-          </SidebarProvider>
-        </TooltipProvider>
+        {/* Fine grain overlay breaks digital flatness; never intercepts input. */}
+        <div
+          aria-hidden
+          className="pointer-events-none fixed inset-0 z-50 opacity-[0.018] mix-blend-soft-light"
+          style={{
+            backgroundImage:
+              "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E\")",
+          }}
+        />
+        <ThemeProvider>
+          <TooltipProvider>
+            <SidebarProvider>
+              <AppSidebar />
+              <SidebarInset className="mt-2 mr-2 mb-2 border rounded-xl border-border bg-popover shadow-[var(--shadow-ambient)]">
+                <Header />
+                <main className="flex-1 overflow-auto flex flex-col">
+                  {children}
+                </main>
+              </SidebarInset>
+            </SidebarProvider>
+          </TooltipProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

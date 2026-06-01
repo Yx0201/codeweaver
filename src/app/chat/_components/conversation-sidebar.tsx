@@ -21,6 +21,20 @@ import {
 import { cn } from "@/lib/utils";
 import type { ConversationItem } from "./chat-shell";
 
+function formatRelativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const diff = Date.now() - then;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "刚刚";
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} 天前`;
+  return new Date(iso).toLocaleDateString("zh-CN");
+}
+
 interface ConversationSidebarProps {
   conversations: ConversationItem[];
   currentConversationId?: string;
@@ -182,20 +196,34 @@ function ConversationItemRow({
     <>
       <div
         className={cn(
-          "group flex items-center gap-2 rounded-lg px-2 py-2 cursor-pointer hover:bg-muted/60 transition-colors",
-          isActive && "bg-muted"
+          "group relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 cursor-pointer transition-colors hover:bg-muted/60",
+          "before:absolute before:left-0 before:top-1/2 before:h-0 before:w-0.5 before:-translate-y-1/2 before:rounded-full before:bg-primary before:transition-all",
+          isActive && "bg-accent/60 before:h-5"
         )}
         onClick={onSelect}
       >
-        <MessageSquare className="size-4 shrink-0 text-muted-foreground" />
+        <MessageSquare
+          className={cn(
+            "size-4 shrink-0 transition-colors",
+            isActive ? "text-primary" : "text-muted-foreground"
+          )}
+        />
         <div className="flex-1 min-w-0">
           {isPendingTitle ? (
             <Skeleton className="h-4 w-24" />
           ) : (
-            <p className="text-sm truncate">
+            <p
+              className={cn(
+                "text-sm truncate",
+                isActive ? "font-medium text-foreground" : "text-foreground/90"
+              )}
+            >
               {conversation.title ?? "新对话"}
             </p>
           )}
+          <p className="mt-0.5 font-mono text-[10px] tracking-tight text-muted-foreground">
+            {formatRelativeTime(conversation.updated_at)}
+          </p>
         </div>
         {/* Action buttons, visible on hover */}
         <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -250,22 +278,33 @@ export function ConversationSidebar({
   onDelete,
 }: ConversationSidebarProps) {
   return (
-    <div className="w-56 shrink-0 flex flex-col h-full bg-muted/20 p-2 gap-2">
+    <div className="w-60 shrink-0 flex flex-col h-full bg-muted/20 p-3 gap-3">
       <Button
-        variant="outline"
         size="sm"
-        className="w-full justify-start gap-2"
+        className="w-full justify-start gap-2 transition-transform active:scale-[0.98]"
         onClick={onNew}
       >
         <MessageSquarePlus className="size-4" />
         新对话
       </Button>
 
-      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5">
+      <div className="flex items-center justify-between px-1">
+        <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
+          对话历史
+        </span>
+        {conversations.length > 0 && (
+          <span className="font-mono text-[10px] tabular-nums text-muted-foreground">
+            {conversations.length}
+          </span>
+        )}
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-0.5 -mx-1 px-1">
         {conversations.length === 0 ? (
-          <p className="text-xs text-muted-foreground text-center py-6">
-            暂无对话记录
-          </p>
+          <div className="flex flex-col items-center gap-2 py-10 text-center text-muted-foreground">
+            <MessageSquare className="size-6 opacity-40" />
+            <p className="text-xs">暂无对话记录</p>
+          </div>
         ) : (
           conversations.map((conv) => (
             <ConversationItemRow

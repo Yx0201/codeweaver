@@ -39,12 +39,14 @@ const ENTITY_TYPE_LABELS: Record<string, string> = {
   concept: "概念",
 };
 
+// Entity hues tuned to read on the dark charcoal canvas — moderate
+// saturation, lifted lightness, with the brand teal reserved for locations.
 const ENTITY_TYPE_COLORS: Record<string, string> = {
-  person: "#1d4ed8",
-  location: "#0f766e",
-  organization: "#7c3aed",
-  event: "#c2410c",
-  concept: "#475569",
+  person: "#6aa0f0",
+  location: "#49b8a6",
+  organization: "#a98ae6",
+  event: "#e0a36a",
+  concept: "#93a0b3",
 };
 
 function getEntityLabel(entityType: string): string {
@@ -52,7 +54,7 @@ function getEntityLabel(entityType: string): string {
 }
 
 function getEntityColor(entityType: string): string {
-  return ENTITY_TYPE_COLORS[entityType] ?? "#334155";
+  return ENTITY_TYPE_COLORS[entityType] ?? "#93a0b3";
 }
 
 export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
@@ -107,10 +109,11 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
         animationDurationUpdate: 300,
         tooltip: {
           confine: true,
-          backgroundColor: "rgba(15, 23, 42, 0.92)",
-          borderWidth: 0,
+          backgroundColor: "rgba(18, 22, 28, 0.94)",
+          borderColor: "rgba(255,255,255,0.08)",
+          borderWidth: 1,
           textStyle: {
-            color: "#f8fafc",
+            color: "#e6e9ed",
             fontSize: 12,
           },
           formatter: (params: GraphEventPayload) => {
@@ -149,7 +152,7 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
               gravity: 0.08,
             },
             lineStyle: {
-              color: "rgba(71, 85, 105, 0.35)",
+              color: "rgba(148, 163, 184, 0.22)",
               width: 1.4,
               curveness: 0.15,
             },
@@ -157,13 +160,13 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
               focus: "adjacency",
               lineStyle: {
                 width: 2,
-                color: "rgba(15, 23, 42, 0.55)",
+                color: "rgba(73, 184, 166, 0.6)",
               },
             },
             label: {
               show: true,
               position: "right",
-              color: "#0f172a",
+              color: "#d7dde6",
               fontSize: 12,
               formatter: "{b}",
             },
@@ -175,10 +178,10 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
               symbolSize: Math.max(38, Math.min(74, 30 + node.supportCount * 6)),
               itemStyle: {
                 color: getEntityColor(node.entityType),
-                borderColor: "#ffffff",
+                borderColor: "rgba(255, 255, 255, 0.14)",
                 borderWidth: 2,
                 shadowBlur: 18,
-                shadowColor: "rgba(15, 23, 42, 0.08)",
+                shadowColor: "rgba(0, 0, 0, 0.35)",
               },
               entityType: node.entityType,
               entityTypeLabel: getEntityLabel(node.entityType),
@@ -198,8 +201,8 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
                   show: true,
                   formatter: edge.relation,
                   fontSize: 11,
-                  color: "#475569",
-                  backgroundColor: "rgba(255,255,255,0.88)",
+                  color: "#aab4c0",
+                  backgroundColor: "rgba(28, 33, 40, 0.9)",
                   padding: [2, 5],
                   borderRadius: 999,
                 },
@@ -294,8 +297,8 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
 
   return (
     <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-      <Card className="overflow-hidden border-0 bg-linear-to-br from-slate-50 via-white to-slate-100 ring-1 ring-slate-200">
-        <CardHeader className="border-b border-slate-200/80 bg-white/85 backdrop-blur">
+      <Card className="overflow-hidden border-border bg-card">
+        <CardHeader className="border-b border-border bg-card/60 backdrop-blur">
           <CardTitle className="flex items-center gap-2">
             <Orbit className="size-4 text-primary" />
             知识图谱
@@ -305,52 +308,41 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
           </CardDescription>
         </CardHeader>
         <CardContent className="px-0 pb-0">
-          <div className="grid gap-3 border-b border-slate-200/80 px-4 py-4 md:grid-cols-4">
-            <div className="rounded-2xl bg-white/90 p-3 ring-1 ring-slate-200">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Sparkles className="size-3.5" />
-                实体
+          <div className="grid gap-3 border-b border-border px-4 py-4 md:grid-cols-4">
+            {[
+              { icon: Sparkles, label: "实体", value: graph.summary.entityCount },
+              { icon: Radar, label: "关系", value: graph.summary.relationCount },
+              { icon: Network, label: "原文分块", value: graph.summary.chunkCount },
+              { icon: Orbit, label: "文件", value: graph.summary.fileCount },
+            ].map((stat) => (
+              <div
+                key={stat.label}
+                className="rounded-xl bg-muted/40 p-3 ring-1 ring-border"
+              >
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <stat.icon className="size-3.5" />
+                  {stat.label}
+                </div>
+                <div className="mt-2 text-2xl font-semibold tabular-nums text-foreground">
+                  {stat.value}
+                </div>
               </div>
-              <div className="mt-2 text-2xl font-semibold text-slate-900">
-                {graph.summary.entityCount}
-              </div>
-            </div>
-            <div className="rounded-2xl bg-white/90 p-3 ring-1 ring-slate-200">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Radar className="size-3.5" />
-                关系
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-slate-900">
-                {graph.summary.relationCount}
-              </div>
-            </div>
-            <div className="rounded-2xl bg-white/90 p-3 ring-1 ring-slate-200">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Network className="size-3.5" />
-                原文分块
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-slate-900">
-                {graph.summary.chunkCount}
-              </div>
-            </div>
-            <div className="rounded-2xl bg-white/90 p-3 ring-1 ring-slate-200">
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Orbit className="size-3.5" />
-                文件
-              </div>
-              <div className="mt-2 text-2xl font-semibold text-slate-900">
-                {graph.summary.fileCount}
-              </div>
-            </div>
+            ))}
           </div>
+          {/*
+            Fixed dark visualization viewport — graph node/edge labels are tuned
+            for a dark canvas, so the chart pane stays charcoal in both themes.
+            Treating it as a deliberate "data canvas" pane reads as intentional
+            rather than an accidental dark block in the light layout.
+          */}
           <div
             ref={chartRef}
-            className="h-[560px] w-full bg-[radial-gradient(circle_at_top,rgba(148,163,184,0.12),transparent_36%),linear-gradient(180deg,rgba(255,255,255,0.45),rgba(248,250,252,0.85))]"
+            className="h-[560px] w-full border-t border-border bg-[oklch(0.178_0.006_240)] bg-[radial-gradient(circle_at_top,rgba(73,184,166,0.1),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.18))]"
           />
         </CardContent>
       </Card>
 
-      <Card className="border-slate-200 bg-white/95">
+      <Card className="border-border bg-card">
         <CardHeader>
           <CardTitle>图谱详情</CardTitle>
           <CardDescription>
@@ -360,41 +352,43 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
         <CardContent className="space-y-4">
           {selection ? (
             <>
-              <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
-                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
+              <div className="rounded-xl border border-border bg-muted/40 p-4">
+                <p className="font-mono text-xs uppercase tracking-[0.2em] text-primary">
                   {selection.kind === "node" ? "Entity" : "Relation"}
                 </p>
-                <h3 className="mt-2 text-lg font-semibold text-slate-950">
+                <h3 className="mt-2 text-lg font-semibold tracking-tight text-foreground">
                   {selection.title}
                 </h3>
-                <p className="mt-1 text-sm text-slate-600">{selection.subtitle}</p>
-                <p className="mt-3 text-xs text-slate-500">{selection.meta}</p>
+                <p className="mt-1 text-sm text-muted-foreground">{selection.subtitle}</p>
+                <p className="mt-3 font-mono text-xs tabular-nums text-muted-foreground">
+                  {selection.meta}
+                </p>
               </div>
 
-              <div className="rounded-2xl border border-dashed border-slate-200 p-4">
-                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
+              <div className="rounded-xl border border-dashed border-border p-4">
+                <p className="font-mono text-xs uppercase tracking-[0.2em] text-muted-foreground">
                   描述
                 </p>
-                <p className="mt-2 text-sm leading-6 text-slate-700">
+                <p className="mt-2 text-sm leading-6 text-foreground/80">
                   {selection.description ?? "当前项暂无补充描述，图谱展示仍可用于快速浏览关系结构。"}
                 </p>
               </div>
             </>
           ) : (
-            <div className="rounded-2xl border border-dashed border-slate-200 p-4 text-sm text-muted-foreground">
+            <div className="rounded-xl border border-dashed border-border p-4 text-sm text-muted-foreground">
               请选择左侧图谱中的节点或关系查看详情。
             </div>
           )}
 
-          <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4">
-            <p className="text-xs uppercase tracking-[0.2em] text-slate-500">
+          <div className="rounded-xl border border-border bg-muted/40 p-4">
+            <p className="font-mono text-xs uppercase tracking-[0.2em] text-muted-foreground">
               图例
             </p>
             <div className="mt-3 space-y-2">
               {Object.entries(ENTITY_TYPE_LABELS).map(([key, label]) => (
-                <div key={key} className="flex items-center gap-3 text-sm text-slate-700">
+                <div key={key} className="flex items-center gap-3 text-sm text-foreground/80">
                   <span
-                    className="size-3 rounded-full"
+                    className="size-3 rounded-full ring-1 ring-white/10"
                     style={{ backgroundColor: getEntityColor(key) }}
                   />
                   <span>{label}</span>

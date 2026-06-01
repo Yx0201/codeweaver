@@ -50,19 +50,23 @@ export function KnowledgeBaseCard({
   return (
     <>
       <Card
-        className="cursor-pointer hover:border-primary transition-colors"
+        className="group cursor-pointer transition-colors duration-200 hover:border-primary/40"
         onClick={() => router.push(`/knowledge/${id}`)}
       >
         <CardHeader className="py-4">
-          <div className="flex items-start gap-3">
-            <BookOpen className="w-5 h-5 text-muted-foreground mt-0.5" />
+          <div className="flex items-start gap-3.5">
+            <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15 transition-transform duration-200 group-hover:-translate-y-0.5">
+              <BookOpen className="size-5" strokeWidth={1.75} />
+            </span>
             <div className="flex-1 min-w-0">
-              <CardTitle className="text-base">{name}</CardTitle>
+              <CardTitle className="text-base tracking-tight">{name}</CardTitle>
               {description && (
                 <CardDescription className="mt-1">{description}</CardDescription>
               )}
-              <p className="text-xs text-muted-foreground mt-2">
-                {fileCount} 个文件 · 创建于 {createdAt}
+              <p className="mt-2 flex items-center gap-1.5 font-mono text-xs text-muted-foreground tabular-nums">
+                <span>{fileCount} 个文件</span>
+                <span className="text-border">·</span>
+                <span>创建于 {createdAt}</span>
               </p>
             </div>
             <Button

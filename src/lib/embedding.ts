@@ -1,11 +1,10 @@
-const OLLAMA_BASE_URL =
-  process.env.LOCAL_MODEL_BASE_URL ?? "http://localhost:11434/api";
+import { OLLAMA_API_URL, EMBEDDING_MODEL } from "./config";
 
 export async function generateEmbedding(text: string): Promise<number[]> {
-  const response = await fetch(`${OLLAMA_BASE_URL}/embed`, {
+  const response = await fetch(`${OLLAMA_API_URL}/embed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "bge-m3:latest", input: text }),
+    body: JSON.stringify({ model: EMBEDDING_MODEL, input: text }),
   });
 
   if (!response.ok) {
@@ -19,10 +18,10 @@ export async function generateEmbedding(text: string): Promise<number[]> {
 export async function generateEmbeddings(
   texts: string[]
 ): Promise<number[][]> {
-  const response = await fetch(`${OLLAMA_BASE_URL}/embed`, {
+  const response = await fetch(`${OLLAMA_API_URL}/embed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model: "bge-m3:latest", input: texts }),
+    body: JSON.stringify({ model: EMBEDDING_MODEL, input: texts }),
   });
 
   if (!response.ok) {

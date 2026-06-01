@@ -40,13 +40,13 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env.local"))
 NEXTJS_BASE_URL = os.environ.get("NEXTJS_BASE_URL", "http://localhost:3000")
 
 # Ollama embedding model for ragas metric evaluation (not for the RAG pipeline)
-OLLAMA_BASE_URL = os.environ.get("LOCAL_OLLAMA_BASE_URL", "http://localhost:11434")
-EMBEDDING_MODEL = os.environ.get("LOCAL_EMBEDDING_MODEL", "bge-m3:latest")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "bge-m3:latest")
 
-# External LLM for ragas metric scoring (via Zenmux)
-ZENMUX_API_KEY = os.environ.get("ZENMUX_API_KEY", "")
-ZENMUX_BASE_URL = os.environ.get("ZENMUX_BASE_URL", "https://zenmux.ai/api/v1")
-ZENMUX_MODEL_NAME = os.environ.get("ZENMUX_MODEL_NAME", "")
+# External LLM for ragas metric scoring
+RAGAS_EVAL_API_KEY = os.environ.get("RAGAS_EVAL_API_KEY", "")
+RAGAS_EVAL_BASE_URL = os.environ.get("RAGAS_EVAL_BASE_URL", "https://zenmux.ai/api/v1")
+RAGAS_EVAL_MODEL = os.environ.get("RAGAS_EVAL_MODEL", "")
 
 # Hybrid retrieval Top-K parameters
 VECTOR_TOP_K = int(os.environ.get("VECTOR_TOP_K", "50"))
@@ -210,16 +210,20 @@ def generate_answer(query: str, system_prompt: str) -> str:
 def resolve_knowledge_base_id() -> int:
     """Find the knowledge base via direct DB query."""
     import psycopg2
+    from urllib.parse import urlparse
 
-    DB_HOST = os.environ.get("DB_HOST", "localhost")
-    DB_PORT = os.environ.get("DB_PORT", "5432")
-    DB_NAME = os.environ.get("DB_NAME", "knowledge_db")
-    DB_USER = os.environ.get("DB_USER", "bbimasheep")
-    DB_PASSWORD = os.environ.get("DB_PASSWORD", "")
+    database_url = os.environ.get("DATABASE_URL", "")
+    if not database_url:
+        print("ERROR: DATABASE_URL not set in .env.local")
+        sys.exit(1)
 
+    parsed = urlparse(database_url)
     conn = psycopg2.connect(
-        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD,
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        dbname=parsed.path.lstrip("/").split("?")[0],
+        user=parsed.username,
+        password=parsed.password or "",
     )
     try:
         with conn.cursor() as cur:
@@ -252,7 +256,7 @@ async def run_evaluation():
     print("  RAG Recall Evaluation (ragas) — Hybrid Retrieval")
     print("=" * 60)
     print(f"Next.js URL:     {NEXTJS_BASE_URL}")
-    print(f"Scoring LLM:     {ZENMUX_MODEL_NAME} (via Zenmux, base={ZENMUX_BASE_URL})")
+    print(f"Scoring LLM:     {RAGAS_EVAL_MODEL} (base={RAGAS_EVAL_BASE_URL})")
     print(f"Eval Embeddings: {EMBEDDING_MODEL} (local Ollama)")
     print(f"Hybrid Top-K:    vector={VECTOR_TOP_K}, keyword={KEYWORD_TOP_K}, final={FINAL_TOP_K}")
     print(f"Golden Dataset:  {len(golden_dataset)} questions")
@@ -305,14 +309,14 @@ async def run_evaluation():
     # 4. Configure ragas: external LLM for scoring, local Ollama for embeddings
     print("[3/3] Running ragas evaluation (this may take a while)...\n")
 
-    if not ZENMUX_API_KEY or not ZENMUX_MODEL_NAME:
-        print("ERROR: ZENMUX_API_KEY, ZENMUX_BASE_URL, ZENMUX_MODEL_NAME must be set in .env.local")
+    if not RAGAS_EVAL_API_KEY or not RAGAS_EVAL_MODEL:
+        print("ERROR: RAGAS_EVAL_API_KEY, RAGAS_EVAL_BASE_URL, RAGAS_EVAL_MODEL must be set in .env.local")
         sys.exit(1)
 
     scoring_llm = ChatOpenAI(
-        model=ZENMUX_MODEL_NAME,
-        api_key=ZENMUX_API_KEY,
-        base_url=ZENMUX_BASE_URL,
+        model=RAGAS_EVAL_MODEL,
+        api_key=RAGAS_EVAL_API_KEY,
+        base_url=RAGAS_EVAL_BASE_URL,
         temperature=0,
     )
     embeddings = OllamaEmbeddings(
@@ -320,7 +324,7 @@ async def run_evaluation():
         base_url=OLLAMA_BASE_URL,
     )
 
-    ragas_llm = LangchainLLMWrapper(scoring_llm)
+    ragas_llm = LangchainLLMWrapper(scoring_llm, bypass_n=True)
     ragas_embeddings = LangchainEmbeddingsWrapper(embeddings)
 
     metrics = [

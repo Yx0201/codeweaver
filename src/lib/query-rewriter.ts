@@ -1,9 +1,9 @@
 import { generateText } from "ai";
 import { createOllama } from "ollama-ai-provider-v2";
-import { OLLAMA_BASE_URL } from "./config";
+import { OLLAMA_API_URL, QUERY_REWRITE_MODEL } from "./config";
 
-const ollama = createOllama({ baseURL: OLLAMA_BASE_URL });
-const rewriterModel = ollama("qwen3:0.6b");
+const ollama = createOllama({ baseURL: OLLAMA_API_URL });
+const rewriterModel = ollama(QUERY_REWRITE_MODEL);
 
 export type RewriteMode = "rewrite" | "hyde" | "expand";
 

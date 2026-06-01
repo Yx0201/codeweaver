@@ -14,8 +14,12 @@ The server will be available at http://localhost:8081
 
 import os
 import time
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from pydantic import BaseModel
+
+# Load project env vars so RERANKER_MODEL etc. are available
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env.local"))
 
 app = FastAPI()
 

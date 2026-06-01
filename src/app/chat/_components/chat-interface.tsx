@@ -18,7 +18,7 @@ import {
   PromptInputSubmit,
 } from "@/components/ai-elements/prompt-input";
 import { MessageResponse } from "@/components/ai-elements/message";
-import { RefreshCcwIcon, CopyIcon, BookOpen, Search } from "lucide-react";
+import { RefreshCcwIcon, CopyIcon, BookOpen, Search, Bot, User } from "lucide-react";
 import { useChat } from "@ai-sdk/react";
 import { Fragment } from "react";
 import {
@@ -259,9 +259,15 @@ export function ChatInterface({
                             <div
                               className={`w-full flex ${message.role === "user" ? "flex-row-reverse" : ""}`}
                             >
-                              <div
-                                className={`w-8 h-8 rounded-2xl ${message.role === "user" ? "bg-sky-300" : "bg-green-300"}`}
-                              />
+                              {message.role === "user" ? (
+                                <div className="flex size-8 items-center justify-center rounded-xl bg-secondary text-secondary-foreground ring-1 ring-border">
+                                  <User className="size-4" strokeWidth={1.75} />
+                                </div>
+                              ) : (
+                                <div className="flex size-8 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
+                                  <Bot className="size-4" strokeWidth={1.75} />
+                                </div>
+                              )}
                             </div>
                             <MessageContent>
                               <MessageResponse>{part.text}</MessageResponse>
@@ -297,7 +303,9 @@ export function ChatInterface({
             {status === "submitted" && (
               <Message from="assistant">
                 <div className="w-full flex">
-                  <div className="w-8 h-8 rounded-2xl bg-green-300" />
+                  <div className="flex size-8 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
+                    <Bot className="size-4" strokeWidth={1.75} />
+                  </div>
                 </div>
                 <MessageContent>
                   <div className="flex items-center gap-1 py-1 px-1">
@@ -312,35 +320,39 @@ export function ChatInterface({
           <ConversationScrollButton />
         </Conversation>
 
-        <div className="mt-4 w-full max-w-2xl mx-auto flex flex-col gap-2 shrink-0">
-          <div className="flex items-center gap-2">
-            <BookOpen className="size-4 text-muted-foreground shrink-0" />
-            <Select value={selectedKbId} onValueChange={handleKbChange}>
-              <SelectTrigger className="w-48">
-                <SelectValue placeholder="选择知识库（可选）" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">不使用知识库</SelectItem>
-                {knowledgeBases.map((kb) => (
-                  <SelectItem key={kb.id} value={String(kb.id)}>
-                    {kb.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Search className="size-4 text-muted-foreground shrink-0 ml-2" />
-            <Select value={searchMode} onValueChange={(v) => handleSearchModeChange(v as SearchMode)}>
-              <SelectTrigger className="w-32">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {SEARCH_MODES.map((mode) => (
-                  <SelectItem key={mode.value} value={mode.value}>
-                    {mode.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+        <div className="mt-4 w-full max-w-2xl mx-auto flex flex-col gap-2.5 shrink-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card/60 pl-2.5 pr-1.5 py-1">
+              <BookOpen className="size-3.5 text-muted-foreground shrink-0" />
+              <Select value={selectedKbId} onValueChange={handleKbChange}>
+                <SelectTrigger className="h-7 w-44 border-0 bg-transparent shadow-none focus-visible:ring-0">
+                  <SelectValue placeholder="选择知识库（可选）" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">不使用知识库</SelectItem>
+                  {knowledgeBases.map((kb) => (
+                    <SelectItem key={kb.id} value={String(kb.id)}>
+                      {kb.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card/60 pl-2.5 pr-1.5 py-1">
+              <Search className="size-3.5 text-muted-foreground shrink-0" />
+              <Select value={searchMode} onValueChange={(v) => handleSearchModeChange(v as SearchMode)}>
+                <SelectTrigger className="h-7 w-28 border-0 bg-transparent shadow-none focus-visible:ring-0">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SEARCH_MODES.map((mode) => (
+                    <SelectItem key={mode.value} value={mode.value}>
+                      {mode.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           <PromptInput onSubmit={handleSubmit} className="w-full relative">

@@ -15,8 +15,9 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 
 const routeLabels: Record<string, string> = {
   "/": "首页",
-  "/chat": "Chat",
-  "/knowledge": "Knowledge",
+  "/chat": "对话",
+  "/knowledge": "知识库",
+  "/settings": "系统设置",
 };
 
 export function Header() {
@@ -30,9 +31,9 @@ export function Header() {
   };
 
   return (
-    <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
-      <SidebarTrigger />
-      <div className="w-px h-7 bg-gray-300"></div>
+    <header className="flex h-14 shrink-0 items-center gap-3 border-b bg-popover/60 px-4 backdrop-blur supports-[backdrop-filter]:bg-popover/40">
+      <SidebarTrigger className="-ml-1" />
+      <div className="h-5 w-px bg-border" />
       <Breadcrumb>
         <BreadcrumbList>
           <BreadcrumbItem>

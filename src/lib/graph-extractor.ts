@@ -1,4 +1,4 @@
-import { GRAPH_EXTRACT_MODEL, OLLAMA_BASE_URL } from "./config";
+import { GRAPH_EXTRACT_MODEL, OLLAMA_API_URL } from "./config";
 import { jsonrepair } from "jsonrepair";
 import { z } from "zod";
 
@@ -12,7 +12,7 @@ const ENTITY_TYPE_VALUES = [
 
 type CanonicalEntityType = (typeof ENTITY_TYPE_VALUES)[number];
 
-const OLLAMA_GENERATE_URL = `${OLLAMA_BASE_URL}/generate`;
+const OLLAMA_GENERATE_URL = `${OLLAMA_API_URL}/generate`;
 const GRAPH_KEEP_ALIVE = "5m";
 
 const graphExtractSystemPrompt = `
