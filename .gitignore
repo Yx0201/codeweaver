@@ -51,3 +51,4 @@ packages/rag-eval/eval_results.json
 
 # log
 specCoding
+/logs

@@ -18,10 +18,30 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   try {
     const { text } = await generateText({
       model,
-      prompt: `请用简短的标题（不超过10个字）概括以下消息的主题，只输出标题本身，不加引号、标点或解释：\n\n${userMessage}`,
+      // `/no_think` disables Qwen3's reasoning mode for this turn. The
+      // default title model (qwen3:0.6b) is a reasoning model — without
+      // this directive its short output window gets consumed by <think>…
+      // reasoning and the actual title never appears (or gets truncated
+      // mid-think and leaks into the UI as the title).
+      prompt: `请用简短的标题（不超过10个字）概括以下消息的主题，只输出标题本身，不加引号、标点或解释：\n\n${userMessage}\n\n/no_think`,
     });
 
-    const title = text.trim().replace(/^["'「」【】]+|["'「」【】]+$/g, "").slice(0, 20) || "新对话";
+    const cleaned = text
+      // Strip any reasoning blocks the model still emits despite /no_think.
+      .replace(/<think>[\s\S]*?<\/think>/gi, "")
+      .replace(/<\/?think>/gi, "")
+      .trim()
+      // Trim wrapping quotes / brackets the model sometimes adds.
+      .replace(/^["'「」【】]+|["'「」【】]+$/g, "")
+      .trim();
+
+    // Guard against a truncated-mid-think response or empty output —
+    // any leftover angle bracket means we have a malformed/partial tag,
+    // not a real title.
+    const title =
+      cleaned.length > 0 && !cleaned.includes("<")
+        ? cleaned.slice(0, 20)
+        : "新对话";
 
     await prisma.conversation.update({
       where: { id },

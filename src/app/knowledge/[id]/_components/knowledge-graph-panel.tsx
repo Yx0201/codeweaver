@@ -3,7 +3,37 @@
 import { useEffect, useRef, useState } from "react";
 import { Network, Orbit, Radar, Sparkles } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { useTheme } from "@/components/theme/theme-provider";
 import type { KnowledgeGraphData } from "@/lib/knowledge-graph";
+
+// Per-theme color set for the ECharts canvas — node/edge labels and lines
+// need to be lifted or darkened depending on the surface they paint on.
+const CHART_PALETTES = {
+  light: {
+    nodeLabel: "#1f2937",
+    nodeBorder: "#ffffff",
+    nodeShadow: "rgba(15, 23, 42, 0.12)",
+    line: "rgba(71, 85, 105, 0.3)",
+    lineEmphasis: "rgba(73, 150, 135, 0.7)",
+    edgeLabel: "#475569",
+    edgeLabelBg: "rgba(255, 255, 255, 0.92)",
+    tooltipBg: "rgba(18, 22, 28, 0.94)",
+    tooltipBorder: "rgba(255, 255, 255, 0.08)",
+    tooltipText: "#e6e9ed",
+  },
+  dark: {
+    nodeLabel: "#d7dde6",
+    nodeBorder: "rgba(255, 255, 255, 0.14)",
+    nodeShadow: "rgba(0, 0, 0, 0.35)",
+    line: "rgba(148, 163, 184, 0.22)",
+    lineEmphasis: "rgba(73, 184, 166, 0.6)",
+    edgeLabel: "#aab4c0",
+    edgeLabelBg: "rgba(28, 33, 40, 0.9)",
+    tooltipBg: "rgba(18, 22, 28, 0.94)",
+    tooltipBorder: "rgba(255, 255, 255, 0.08)",
+    tooltipText: "#e6e9ed",
+  },
+} as const;
 
 interface KnowledgeGraphPanelProps {
   graph: KnowledgeGraphData;
@@ -59,6 +89,8 @@ function getEntityColor(entityType: string): string {
 
 export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
   const chartRef = useRef<HTMLDivElement | null>(null);
+  const { resolvedTheme } = useTheme();
+  const palette = CHART_PALETTES[resolvedTheme];
   const [selection, setSelection] = useState<Selection>(
     graph.nodes[0]
       ? {
@@ -109,11 +141,11 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
         animationDurationUpdate: 300,
         tooltip: {
           confine: true,
-          backgroundColor: "rgba(18, 22, 28, 0.94)",
-          borderColor: "rgba(255,255,255,0.08)",
+          backgroundColor: palette.tooltipBg,
+          borderColor: palette.tooltipBorder,
           borderWidth: 1,
           textStyle: {
-            color: "#e6e9ed",
+            color: palette.tooltipText,
             fontSize: 12,
           },
           formatter: (params: GraphEventPayload) => {
@@ -152,7 +184,7 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
               gravity: 0.08,
             },
             lineStyle: {
-              color: "rgba(148, 163, 184, 0.22)",
+              color: palette.line,
               width: 1.4,
               curveness: 0.15,
             },
@@ -160,13 +192,13 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
               focus: "adjacency",
               lineStyle: {
                 width: 2,
-                color: "rgba(73, 184, 166, 0.6)",
+                color: palette.lineEmphasis,
               },
             },
             label: {
               show: true,
               position: "right",
-              color: "#d7dde6",
+              color: palette.nodeLabel,
               fontSize: 12,
               formatter: "{b}",
             },
@@ -178,10 +210,10 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
               symbolSize: Math.max(38, Math.min(74, 30 + node.supportCount * 6)),
               itemStyle: {
                 color: getEntityColor(node.entityType),
-                borderColor: "rgba(255, 255, 255, 0.14)",
+                borderColor: palette.nodeBorder,
                 borderWidth: 2,
                 shadowBlur: 18,
-                shadowColor: "rgba(0, 0, 0, 0.35)",
+                shadowColor: palette.nodeShadow,
               },
               entityType: node.entityType,
               entityTypeLabel: getEntityLabel(node.entityType),
@@ -201,8 +233,8 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
                   show: true,
                   formatter: edge.relation,
                   fontSize: 11,
-                  color: "#aab4c0",
-                  backgroundColor: "rgba(28, 33, 40, 0.9)",
+                  color: palette.edgeLabel,
+                  backgroundColor: palette.edgeLabelBg,
                   padding: [2, 5],
                   borderRadius: 999,
                 },
@@ -268,7 +300,9 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
       mounted = false;
       cleanup();
     };
-  }, [graph]);
+    // `palette` is derived from resolvedTheme, so depending on it is enough to
+    // re-mount the chart whenever the theme flips.
+  }, [graph, palette]);
 
   if (graph.nodes.length === 0) {
     return (
@@ -330,14 +364,14 @@ export function KnowledgeGraphPanel({ graph }: KnowledgeGraphPanelProps) {
             ))}
           </div>
           {/*
-            Fixed dark visualization viewport — graph node/edge labels are tuned
-            for a dark canvas, so the chart pane stays charcoal in both themes.
-            Treating it as a deliberate "data canvas" pane reads as intentional
-            rather than an accidental dark block in the light layout.
+            Chart viewport background flips with the theme via the .dark
+            variant — light surface for day mode, charcoal for dark mode.
+            Node/edge label colors switch in parallel via the CHART_PALETTES
+            map, so labels stay legible on whichever surface is showing.
           */}
           <div
             ref={chartRef}
-            className="h-[560px] w-full border-t border-border bg-[oklch(0.178_0.006_240)] bg-[radial-gradient(circle_at_top,rgba(73,184,166,0.1),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.18))]"
+            className="h-[560px] w-full border-t border-border bg-[radial-gradient(circle_at_top,rgba(73,150,135,0.07),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.6),rgba(241,245,247,0.35))] dark:bg-[radial-gradient(circle_at_top,rgba(73,184,166,0.1),transparent_42%),linear-gradient(180deg,rgba(255,255,255,0.02),rgba(0,0,0,0.18))]"
           />
         </CardContent>
       </Card>

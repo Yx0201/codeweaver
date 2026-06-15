@@ -8,6 +8,7 @@ import { parseUploadPipelineState } from "@/lib/upload-processing";
 import { KnowledgeGraphPanel } from "./_components/knowledge-graph-panel";
 import { UploadFileButton } from "./_components/upload-file-button";
 import { FileList } from "./_components/file-list";
+import { UploadProgressProvider } from "./_components/upload-progress-context";
 
 interface PageProps {
   params: Promise<{ id: string }>;
@@ -71,39 +72,41 @@ export default async function KnowledgeBasePage({ params }: PageProps) {
           <KnowledgeGraphPanel graph={graph} />
         </div>
 
-        <div className="flex items-center justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <h2 className="text-lg font-medium tracking-tight">文件列表</h2>
-            {files.length > 0 && (
-              <span className="rounded-full bg-muted px-2 py-0.5 font-mono text-xs tabular-nums text-muted-foreground ring-1 ring-border">
-                {files.length}
-              </span>
-            )}
+        <UploadProgressProvider knowledgeBaseId={knowledgeBaseId}>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <h2 className="text-lg font-medium tracking-tight">文件列表</h2>
+              {files.length > 0 && (
+                <span className="rounded-full bg-muted px-2 py-0.5 font-mono text-xs tabular-nums text-muted-foreground ring-1 ring-border">
+                  {files.length}
+                </span>
+              )}
+            </div>
+            <UploadFileButton knowledgeBaseId={knowledgeBaseId} />
           </div>
-          <UploadFileButton knowledgeBaseId={knowledgeBaseId} />
-        </div>
 
-        {files.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-16 text-muted-foreground">
-            <span className="flex size-12 items-center justify-center rounded-xl bg-muted ring-1 ring-border">
-              <FolderOpen className="size-6" strokeWidth={1.5} />
-            </span>
-            <p className="mt-4 font-medium text-foreground/80">暂无文件</p>
-            <p className="mt-1 text-sm">上传文档后将自动解析并构建知识图谱</p>
-          </div>
-        ) : (
-          <FileList
-            knowledgeBaseId={knowledgeBaseId}
-            files={files.map((f) => ({
-              id: f.id,
-              filename: f.filename,
-              fileSize: formatFileSize(f.file_size),
-              uploadTime: formatDate(f.upload_time),
-              status: f.status,
-              process: parseUploadPipelineState(f.metadata),
-            }))}
-          />
-        )}
+          {files.length === 0 ? (
+            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-16 text-muted-foreground">
+              <span className="flex size-12 items-center justify-center rounded-xl bg-muted ring-1 ring-border">
+                <FolderOpen className="size-6" strokeWidth={1.5} />
+              </span>
+              <p className="mt-4 font-medium text-foreground/80">暂无文件</p>
+              <p className="mt-1 text-sm">上传文档后将自动解析并构建知识图谱</p>
+            </div>
+          ) : (
+            <FileList
+              knowledgeBaseId={knowledgeBaseId}
+              files={files.map((f) => ({
+                id: f.id,
+                filename: f.filename,
+                fileSize: formatFileSize(f.file_size),
+                uploadTime: formatDate(f.upload_time),
+                status: f.status,
+                process: parseUploadPipelineState(f.metadata),
+              }))}
+            />
+          )}
+        </UploadProgressProvider>
       </div>
     </div>
   );

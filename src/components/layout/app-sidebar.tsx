@@ -59,23 +59,15 @@ export function AppSidebar() {
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
+            {/* Brand mark — the sidebar is permanently icon-only, so the button
+                is simply a fixed, centered gradient tile holding the icon. */}
             <SidebarMenuButton
-              size="lg"
               asChild
-              className="group-data-[collapsible=icon]:p-2! hover:bg-transparent active:bg-transparent"
+              tooltip="CodeWeaver"
+              className="justify-center bg-gradient-to-br from-primary to-primary/70 text-primary-foreground ring-1 ring-primary/30 hover:text-primary-foreground"
             >
               <Link href="/">
-                <span className="flex aspect-square size-9 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-primary/70 text-primary-foreground shadow-[var(--shadow-ambient)] ring-1 ring-primary/30">
-                  <WeaveMark className="size-5" />
-                </span>
-                <div className="grid flex-1 text-left leading-tight">
-                  <span className="truncate font-semibold tracking-tight">
-                    CodeWeaver
-                  </span>
-                  <span className="truncate font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                    knowledge engine
-                  </span>
-                </div>
+                <WeaveMark />
               </Link>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -99,7 +91,7 @@ export function AppSidebar() {
             导航
           </SidebarGroupLabel>
           <SidebarGroupContent>
-            <SidebarMenu>
+            <SidebarMenu className="gap-1">
               {menuItems.map((item) => {
                 const isActive =
                   item.href === "/"

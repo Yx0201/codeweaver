@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ConversationSidebar } from "./conversation-sidebar";
 import { ChatInterface } from "./chat-interface";
 import type { SearchMode } from "@/actions/conversation";
+import type { AssistantMessageMetadata } from "@/lib/citations";
 
 export interface ConversationItem {
   id: string;
@@ -24,6 +25,8 @@ interface InitialMessage {
   role: "user" | "assistant";
   content: string;
   parts: { type: "text"; text: string }[];
+  /** Optional reference list for assistant messages — drives the citation UI. */
+  metadata?: AssistantMessageMetadata;
 }
 
 interface ChatShellProps {

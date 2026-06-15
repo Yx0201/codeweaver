@@ -1,4 +1,11 @@
-import { GRAPH_EXTRACT_MODEL, OLLAMA_API_URL } from "./config";
+import {
+  GRAPH_EXTRACT_MODEL,
+  GRAPH_EXTRACT_API_BASE_URL,
+  GRAPH_EXTRACT_API_KEY,
+  GRAPH_EXTRACT_CLOUD_MODEL,
+  GRAPH_EXTRACT_USE_CLOUD,
+  OLLAMA_API_URL,
+} from "./config";
 import { jsonrepair } from "jsonrepair";
 import { z } from "zod";
 
@@ -45,6 +52,12 @@ const graphExtractSystemPrompt = `
     }
   ]
 }
+
+命名规范（非常重要）：
+- 实体 name 必须使用文中最完整、最正式的名称（全名优先于昵称/简称/代称）
+- 同一实体的昵称、绰号、简称、代称要归一到同一个正式名称，不要输出为多个实体
+- 不要把代词（他、她、它、对方、那人）当成实体
+- relation 用 2~6 个字的动词短语（如「父亲是」「位于」「属于」「参与」「拥有」），不要写完整句子
 
 限制：
 - 最多输出 20 个 entities
@@ -240,6 +253,115 @@ function normalizeExtractionResult(payload: unknown): unknown {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Cloud (OpenAI-compatible) extraction path with rate-limit aware retries
+// ---------------------------------------------------------------------------
+
+/** Count of 429 responses observed since last consume — used by the
+ *  adaptive concurrency controller in the graph-build pipeline. */
+let rateLimitHits = 0;
+
+export function consumeRateLimitHits(): number {
+  const hits = rateLimitHits;
+  rateLimitHits = 0;
+  return hits;
+}
+
+const CLOUD_MAX_RETRIES = 5;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Call the cloud chat-completions endpoint with exponential backoff + jitter.
+ * Honors Retry-After on 429; retries 429/5xx/network errors; thinking disabled.
+ */
+async function callCloudChat(
+  messages: Array<{ role: string; content: string }>,
+  options: { maxTokens?: number; jsonMode?: boolean } = {}
+): Promise<string> {
+  const { maxTokens = 2048, jsonMode = true } = options;
+  let lastError: unknown = null;
+
+  for (let attempt = 0; attempt <= CLOUD_MAX_RETRIES; attempt += 1) {
+    try {
+      const response = await fetch(`${GRAPH_EXTRACT_API_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${GRAPH_EXTRACT_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: GRAPH_EXTRACT_CLOUD_MODEL,
+          messages,
+          ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
+          // DeepSeek v4: disable reasoning/thinking — faster, and structured
+          // output otherwise lands in the `reasoning` field instead of content.
+          thinking: { type: "disabled" },
+          temperature: 0,
+          max_tokens: maxTokens,
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(120_000),
+      });
+
+      if (response.status === 429 || response.status >= 500) {
+        if (response.status === 429) rateLimitHits += 1;
+        const retryAfterHeader =
+          response.headers.get("retry-after-ms") ??
+          response.headers.get("retry-after");
+        let waitMs = 2 ** attempt * 1000 + Math.random() * 1000;
+        if (retryAfterHeader) {
+          const parsed = Number.parseFloat(retryAfterHeader);
+          if (Number.isFinite(parsed)) {
+            waitMs = response.headers.get("retry-after-ms")
+              ? parsed
+              : parsed * 1000;
+          }
+        }
+        lastError = new Error(
+          `云端图谱抽取请求被限流/出错: ${response.status} ${response.statusText}`
+        );
+        if (attempt < CLOUD_MAX_RETRIES) {
+          await sleep(waitMs);
+          continue;
+        }
+        throw lastError;
+      }
+
+      if (!response.ok) {
+        const bodyText = await response.text().catch(() => "");
+        throw new Error(
+          `云端图谱抽取请求失败: ${response.status} ${response.statusText} ${bodyText.slice(0, 200)}`
+        );
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const text = data.choices?.[0]?.message?.content?.trim();
+      if (!text) {
+        throw new Error("云端图谱抽取返回为空");
+      }
+      return text;
+    } catch (error) {
+      lastError = error;
+      const isAbort =
+        error instanceof Error &&
+        (error.name === "TimeoutError" || error.name === "AbortError");
+      const isNetwork = error instanceof TypeError;
+      if ((isAbort || isNetwork) && attempt < CLOUD_MAX_RETRIES) {
+        await sleep(2 ** attempt * 1000 + Math.random() * 1000);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("云端图谱抽取失败");
+}
+
 async function callOllamaGenerate(body: Record<string, unknown>): Promise<string> {
   const response = await fetch(OLLAMA_GENERATE_URL, {
     method: "POST",
@@ -324,6 +446,40 @@ async function parseExtractionPayload(rawResponse: string): Promise<unknown> {
 export async function extractEntitiesAndRelations(
   chunkText: string
 ): Promise<ExtractionResult> {
+  if (GRAPH_EXTRACT_USE_CLOUD) {
+    return extractEntitiesAndRelationsCloud(chunkText);
+  }
+  return extractEntitiesAndRelationsLocal(chunkText);
+}
+
+async function extractEntitiesAndRelationsCloud(
+  chunkText: string
+): Promise<ExtractionResult> {
+  const text = await callCloudChat([
+    { role: "system", content: graphExtractSystemPrompt },
+    { role: "user", content: buildGraphExtractPrompt(chunkText) },
+  ]);
+
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(text);
+  } catch {
+    parsedJson = JSON.parse(jsonrepair(text));
+  }
+
+  const normalized = normalizeExtractionResult(parsedJson);
+  const parsed = extractionSchema.safeParse(normalized);
+
+  if (!parsed.success) {
+    throw new Error(`图谱抽取结果结构校验失败: ${parsed.error.message}`);
+  }
+
+  return parsed.data;
+}
+
+async function extractEntitiesAndRelationsLocal(
+  chunkText: string
+): Promise<ExtractionResult> {
   const text = await callOllamaGenerate({
     model: GRAPH_EXTRACT_MODEL,
     system: graphExtractSystemPrompt,
@@ -354,21 +510,29 @@ export async function extractEntitiesAndRelations(
 
 export async function extractQueryEntities(query: string): Promise<string[]> {
   try {
-    const text = await callOllamaGenerate({
-      model: GRAPH_EXTRACT_MODEL,
-      system: queryEntitySystemPrompt,
-      prompt: `查询：${query}\n\n请提取关键实体：`,
-      stream: false,
-      think: false,
-      keep_alive: GRAPH_KEEP_ALIVE,
-      options: {
-        num_ctx: 2048,
-        num_predict: 128,
-        temperature: 0,
-        top_p: 0.8,
-        repeat_penalty: 1.05,
-      },
-    });
+    const text = GRAPH_EXTRACT_USE_CLOUD
+      ? await callCloudChat(
+          [
+            { role: "system", content: queryEntitySystemPrompt },
+            { role: "user", content: `查询：${query}\n\n请提取关键实体：` },
+          ],
+          { maxTokens: 128, jsonMode: false }
+        )
+      : await callOllamaGenerate({
+          model: GRAPH_EXTRACT_MODEL,
+          system: queryEntitySystemPrompt,
+          prompt: `查询：${query}\n\n请提取关键实体：`,
+          stream: false,
+          think: false,
+          keep_alive: GRAPH_KEEP_ALIVE,
+          options: {
+            num_ctx: 2048,
+            num_predict: 128,
+            temperature: 0,
+            top_p: 0.8,
+            repeat_penalty: 1.05,
+          },
+        });
 
     return text
       .split("\n")

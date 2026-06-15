@@ -11,6 +11,7 @@ interface VectorSearchRequest {
   rerankerTopK?: number;
   fusionTopK?: number;
   searchMode?: RetrievalMode;
+  useGraph?: boolean;
 }
 
 export async function POST(req: Request) {
@@ -25,6 +26,7 @@ export async function POST(req: Request) {
     rerankerTopK,
     fusionTopK,
     searchMode = "hybrid",
+    useGraph,
   } = body;
 
   if (!query || !knowledgeBaseId) {
@@ -44,6 +46,7 @@ export async function POST(req: Request) {
       finalTopK: finalTopK ?? topK ?? DEFAULT_FINAL_TOP_K,
       rerankerTopK,
       fusionTopK,
+      useGraph,
     }
   );
 

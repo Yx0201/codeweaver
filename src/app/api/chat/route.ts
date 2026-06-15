@@ -5,6 +5,12 @@ import { prisma } from "@/lib/prisma";
 import { DEFAULT_VECTOR_TOP_K, DEFAULT_KEYWORD_TOP_K, DEFAULT_FINAL_TOP_K } from "@/lib/config";
 import type { RewriteMode } from "@/lib/query-rewriter";
 import { searchKnowledgeBase, type RetrievalMode } from "@/lib/search-service";
+import {
+  buildSnippet,
+  type AssistantMessageMetadata,
+  type MessageReference,
+} from "@/lib/citations";
+import type { HybridSearchResult } from "@/lib/hybrid-search";
 
 export const maxDuration = 60;
 
@@ -87,6 +93,9 @@ export async function POST(req: Request) {
   // Priority: providedSystemPrompt > build from knowledgeBaseId
   let systemPrompt: string | undefined = providedSystemPrompt;
   let retrievedContexts: string[] = [];
+  // Full retrieval rows are kept (not just chunk_text) so we can build the
+  // per-message reference list that streams to the client and persists.
+  let searchResults: HybridSearchResult[] = [];
 
   if (!systemPrompt && knowledgeBaseId) {
     const lastUserMessage = [...messages]
@@ -95,7 +104,7 @@ export async function POST(req: Request) {
     const query = lastUserMessage ? extractMessageText(lastUserMessage) : "";
 
     if (query) {
-      const results = await searchKnowledgeBase(
+      searchResults = await searchKnowledgeBase(
         query,
         knowledgeBaseId,
         searchMode,
@@ -108,8 +117,8 @@ export async function POST(req: Request) {
           queryRewriteMode,
         }
       );
-      retrievedContexts = results.map((r) => r.chunk_text);
-      if (results.length > 0) {
+      retrievedContexts = searchResults.map((r) => r.chunk_text);
+      if (searchResults.length > 0) {
         systemPrompt = buildRagSystemPrompt(retrievedContexts);
       }
     }
@@ -120,7 +129,7 @@ export async function POST(req: Request) {
     const query = lastUserMessage ? extractMessageText(lastUserMessage) : "";
 
     if (query) {
-      const results = await searchKnowledgeBase(
+      searchResults = await searchKnowledgeBase(
         query,
         knowledgeBaseId,
         searchMode,
@@ -133,9 +142,22 @@ export async function POST(req: Request) {
           queryRewriteMode,
         }
       );
-      retrievedContexts = results.map((r) => r.chunk_text);
+      retrievedContexts = searchResults.map((r) => r.chunk_text);
     }
   }
+
+  // Build the citation reference list — 1-indexed to match the [N] markers
+  // injected by buildRagSystemPrompt. This is the same array sent inline via
+  // the AI SDK's message metadata AND persisted to conversation_message.metadata.
+  const references: MessageReference[] = searchResults.map((r, i) => ({
+    index: i + 1,
+    chunkId: r.chunk_id,
+    fileId: r.file_id,
+    filename: r.filename,
+    chunkText: r.chunk_text,
+    snippet: buildSnippet(r.chunk_text),
+    source: r.source,
+  }));
 
   // --- Eval mode: non-streaming JSON response ---
   if (mode === "eval") {
@@ -171,6 +193,9 @@ export async function POST(req: Request) {
     }
   }
 
+  const assistantMetadata: AssistantMessageMetadata | undefined =
+    references.length > 0 ? { references } : undefined;
+
   const result = streamText({
     model: chatModel,
     system: systemPrompt,
@@ -196,6 +221,10 @@ export async function POST(req: Request) {
               conversation_id: conversationId,
               role: "assistant",
               content: text,
+              // Persist references so the citation UI rehydrates on refresh.
+              metadata: assistantMetadata
+                ? (assistantMetadata as unknown as object)
+                : undefined,
             },
           });
         }
@@ -207,5 +236,11 @@ export async function POST(req: Request) {
     },
   });
 
-  return result.toUIMessageStreamResponse();
+  // Attach the reference list to the assistant message at stream start —
+  // useChat exposes it via `message.metadata`, so the citation UI renders the
+  // moment the answer begins streaming, not after onFinish.
+  return result.toUIMessageStreamResponse({
+    messageMetadata: ({ part }) =>
+      part.type === "start" && assistantMetadata ? assistantMetadata : undefined,
+  });
 }

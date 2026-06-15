@@ -5,6 +5,7 @@ import {
   type ExtractedRelation,
 } from "@/lib/graph-extractor";
 import { generateEmbedding } from "@/lib/embedding";
+import { ENTITY_MERGE_SIMILARITY } from "@/lib/config";
 
 const MAX_GRAPH_NODES = 80;
 const MAX_GRAPH_EDGES = 160;
@@ -46,8 +47,17 @@ function normalizeName(name: string): string {
   return name.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Normalize relation names so semantically identical relations collapse:
+ * collapse whitespace, strip wrapping quotes/punctuation, and cap length.
+ */
 function normalizeRelationName(name: string): string {
-  return name.replace(/\s+/g, " ").trim();
+  return name
+    .replace(/\s+/g, " ")
+    .replace(/^[\s"'“”‘’《》【】()（）.,，。;；:：!！?？-]+/, "")
+    .replace(/[\s"'“”‘’《》【】()（）.,，。;；:：!！?？-]+$/, "")
+    .trim()
+    .slice(0, 30);
 }
 
 function dedupeEntities(entities: ExtractedEntity[]): ExtractedEntity[] {
@@ -94,6 +104,16 @@ function dedupeRelations(relations: ExtractedRelation[]): ExtractedRelation[] {
   return [...relationMap.values()];
 }
 
+/**
+ * Resolve an extracted entity to a kg_entity row, deduplicating in 3 stages:
+ *
+ * 1. Exact match on canonical name OR any recorded alias (case-insensitive).
+ * 2. Embedding similarity match: if the new name is highly similar
+ *    (>= ENTITY_MERGE_SIMILARITY) to an existing entity of the same type,
+ *    merge into it and record the new surface form as an alias.
+ *    Aliases are folded into name_keywords so keyword/graph lookups match them.
+ * 3. Otherwise create a new entity (reusing the embedding already computed).
+ */
 async function resolveEntityId(
   knowledgeBaseId: number,
   entity: ExtractedEntity
@@ -101,12 +121,20 @@ async function resolveEntityId(
   const normalizedName = normalizeName(entity.name);
   if (!normalizedName) return null;
 
+  // Stage 1: exact name or alias match
   const existing = await prisma.$queryRawUnsafe<{ id: string; description: string | null }[]>(
     `SELECT id, description
      FROM kg_entity
      WHERE knowledge_base_id = $1
        AND entity_type = $2
-       AND lower(name) = lower($3)
+       AND (
+         lower(name) = lower($3)
+         OR EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements_text(COALESCE(metadata -> 'aliases', '[]'::jsonb)) alias
+           WHERE lower(alias) = lower($3)
+         )
+       )
      LIMIT 1`,
     knowledgeBaseId,
     entity.entity_type,
@@ -126,6 +154,37 @@ async function resolveEntityId(
     return existing[0].id;
   }
 
+  // Stage 2: embedding-similarity merge into an existing entity
+  let vector: string | null = null;
+  try {
+    const embedding = await generateEmbedding(normalizedName);
+    vector = `[${embedding.join(",")}]`;
+
+    const similar = await prisma.$queryRawUnsafe<
+      { id: string; name: string; similarity: number }[]
+    >(
+      `SELECT id, name, 1 - (name_embedding <=> $3::vector) AS similarity
+       FROM kg_entity
+       WHERE knowledge_base_id = $1
+         AND entity_type = $2
+         AND name_embedding IS NOT NULL
+       ORDER BY name_embedding <=> $3::vector
+       LIMIT 1`,
+      knowledgeBaseId,
+      entity.entity_type,
+      vector
+    );
+
+    const match = similar[0];
+    if (match && match.similarity >= ENTITY_MERGE_SIMILARITY) {
+      await addEntityAlias(match.id, match.name, normalizedName);
+      return match.id;
+    }
+  } catch (error) {
+    console.error("Entity similarity lookup failed:", error);
+  }
+
+  // Stage 3: create a new entity
   const created = await prisma.kg_entity.create({
     data: {
       knowledge_base_id: knowledgeBaseId,
@@ -137,8 +196,10 @@ async function resolveEntityId(
   });
 
   try {
-    const embedding = await generateEmbedding(normalizedName);
-    const vector = `[${embedding.join(",")}]`;
+    if (!vector) {
+      const embedding = await generateEmbedding(normalizedName);
+      vector = `[${embedding.join(",")}]`;
+    }
     await prisma.$executeRawUnsafe(
       `UPDATE kg_entity
        SET name_embedding = $2::vector,
@@ -153,6 +214,47 @@ async function resolveEntityId(
   }
 
   return created.id;
+}
+
+/**
+ * Record an alias on an existing entity and refresh name_keywords so the
+ * alias is matchable by keyword/graph entity lookups.
+ */
+async function addEntityAlias(
+  entityId: string,
+  canonicalName: string,
+  alias: string
+): Promise<void> {
+  try {
+    await prisma.$executeRawUnsafe(
+      `UPDATE kg_entity
+       SET metadata = jsonb_set(
+             COALESCE(metadata, '{}'::jsonb),
+             '{aliases}',
+             (
+               SELECT jsonb_agg(DISTINCT v)
+               FROM jsonb_array_elements_text(
+                 COALESCE(metadata -> 'aliases', '[]'::jsonb) || to_jsonb(ARRAY[$2::text])
+               ) v
+             )
+           ),
+           name_keywords = to_tsvector(
+             'jiebacfg',
+             $3 || ' ' || (
+               SELECT COALESCE(string_agg(v, ' '), '')
+               FROM jsonb_array_elements_text(
+                 COALESCE(metadata -> 'aliases', '[]'::jsonb) || to_jsonb(ARRAY[$2::text])
+               ) v
+             )
+           )
+       WHERE id = $1::uuid`,
+      entityId,
+      alias,
+      canonicalName
+    );
+  } catch (error) {
+    console.error("Failed to record entity alias:", error);
+  }
 }
 
 export async function ingestKnowledgeGraphChunk(params: {

@@ -16,6 +16,8 @@ export interface SearchKnowledgeBaseOptions {
   rerankerTopK?: number;
   fusionTopK?: number;
   queryRewriteMode?: RewriteMode;
+  /** Override the graph channel in hybrid mode (defaults to enabled). */
+  useGraph?: boolean;
 }
 
 export async function searchKnowledgeBase(
@@ -31,12 +33,16 @@ export async function searchKnowledgeBase(
     rerankerTopK,
     fusionTopK,
     queryRewriteMode,
+    useGraph,
   } = options;
 
   if (searchMode === "graph") {
     const results = await graphSearch(query, knowledgeBaseId, finalTopK);
 
     return results.map((result) => ({
+      chunk_id: result.chunk_id,
+      file_id: result.file_id,
+      filename: result.filename,
       chunk_text: result.chunk_text,
       score: result.score,
       source: "graph",
@@ -46,6 +52,9 @@ export async function searchKnowledgeBase(
 
   const hybridOptions: HybridSearchOptions = {
     useReranker: searchMode === "hybrid",
+    // Graph-augmented retrieval: in full hybrid mode the knowledge graph is a
+    // third RRF channel by default; "fast" mode skips it for low latency.
+    useGraph: useGraph ?? searchMode === "hybrid",
     rerankerTopK,
     fusionTopK,
     queryRewriteMode,

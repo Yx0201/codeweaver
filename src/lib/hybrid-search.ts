@@ -1,15 +1,41 @@
 import { vectorSearch } from "@/lib/vector-search";
 import { keywordSearch } from "@/lib/keyword-search";
+import { graphSearch } from "@/lib/graph-search";
 import { rerank } from "@/lib/reranker";
 import { rewriteQuery, type RewriteMode } from "@/lib/query-rewriter";
 import { prisma } from "@/lib/prisma";
-import { RRF_K, DEFAULT_VECTOR_TOP_K, DEFAULT_KEYWORD_TOP_K, DEFAULT_FUSION_TOP_K, DEFAULT_RERANKER_TOP_K, DEFAULT_FINAL_TOP_K } from "@/lib/config";
+import {
+  RRF_K,
+  DEFAULT_VECTOR_TOP_K,
+  DEFAULT_KEYWORD_TOP_K,
+  DEFAULT_FUSION_TOP_K,
+  DEFAULT_RERANKER_TOP_K,
+  DEFAULT_FINAL_TOP_K,
+  DEFAULT_GRAPH_CHANNEL_TOP_K,
+  MIN_RERANK_SCORE,
+  MIN_RERANK_KEEP,
+} from "@/lib/config";
+
+type ChannelLabel = "vector" | "keyword" | "graph";
 
 export interface HybridSearchResult {
+  chunk_id: string;
+  file_id: string;
+  filename: string;
   chunk_text: string;
   score: number;
-  source: "vector" | "keyword" | "both" | "graph";
+  source: ChannelLabel | "both";
   rerank_score?: number;
+  metadata: unknown;
+}
+
+interface RrfFusedEntry {
+  chunk_id: string;
+  file_id: string;
+  filename: string;
+  chunk_text: string;
+  score: number;
+  sources: Set<ChannelLabel>;
   metadata: unknown;
 }
 
@@ -20,7 +46,18 @@ export interface HybridSearchOptions {
   rerankerTopK?: number;
   finalTopK?: number;
   useReranker?: boolean;
+  /** Include graph retrieval as a third RRF channel. */
+  useGraph?: boolean;
+  graphTopK?: number;
   queryRewriteMode?: RewriteMode;
+}
+
+interface ChannelResult {
+  chunk_id: string;
+  file_id: string;
+  filename: string;
+  chunk_text: string;
+  metadata?: unknown;
 }
 
 /**
@@ -28,24 +65,33 @@ export interface HybridSearchOptions {
  *
  * RRF score for each document:  Σ 1 / (k + rank)
  * where k is a smoothing constant (default 60).
+ *
+ * Fusion key is `chunk_id` so the same chunk retrieved by multiple
+ * channels (or multiple sub-queries) accumulates its rank scores.
  */
 function reciprocalRankFusion(
-  resultLists: Array<{ results: { chunk_text: string; metadata?: unknown }[]; label: "vector" | "keyword" }>,
+  resultLists: Array<{
+    results: ChannelResult[];
+    label: ChannelLabel;
+  }>,
   k: number = RRF_K
-): Map<string, { score: number; sources: Set<"vector" | "keyword">; metadata: unknown }> {
-  const scores = new Map<
-    string,
-    { score: number; sources: Set<"vector" | "keyword">; metadata: unknown }
-  >();
+): Map<string, RrfFusedEntry> {
+  const scores = new Map<string, RrfFusedEntry>();
 
   for (const { results, label } of resultLists) {
     results.forEach((r, rank) => {
-        const key = r.chunk_text;
-        const existing = scores.get(key) ?? {
+      const key = r.chunk_id;
+      const existing =
+        scores.get(key) ??
+        ({
+          chunk_id: r.chunk_id,
+          file_id: r.file_id,
+          filename: r.filename,
+          chunk_text: r.chunk_text,
           score: 0,
-          sources: new Set<"vector" | "keyword">(),
+          sources: new Set<ChannelLabel>(),
           metadata: r.metadata,
-        };
+        } as RrfFusedEntry);
       existing.score += 1 / (k + rank + 1);
       existing.sources.add(label);
       scores.set(key, existing);
@@ -55,11 +101,77 @@ function reciprocalRankFusion(
   return scores;
 }
 
+function fusedEntryToResult(entry: RrfFusedEntry): HybridSearchResult {
+  return {
+    chunk_id: entry.chunk_id,
+    file_id: entry.file_id,
+    filename: entry.filename,
+    chunk_text: entry.chunk_text,
+    score: entry.score,
+    source:
+      entry.sources.size > 1 ? "both" : ([...entry.sources][0] as ChannelLabel),
+    metadata: entry.metadata ?? null,
+  };
+}
+
 /**
- * Hybrid search: combines vector search and keyword search via RRF reranking,
+ * Fuse channel results, optionally rerank with a cross-encoder, apply the
+ * low-score cutoff, then resolve child chunks to parents.
+ */
+async function fuseAndFinalize(
+  query: string,
+  resultLists: Array<{ results: ChannelResult[]; label: ChannelLabel }>,
+  finalTopK: number,
+  options: Pick<
+    HybridSearchOptions,
+    "useReranker" | "fusionTopK" | "rerankerTopK"
+  >
+): Promise<HybridSearchResult[]> {
+  const {
+    useReranker = false,
+    fusionTopK = DEFAULT_FUSION_TOP_K,
+    rerankerTopK = DEFAULT_RERANKER_TOP_K,
+  } = options;
+
+  const fused = reciprocalRankFusion(resultLists);
+
+  const fusedResults: HybridSearchResult[] = [...fused.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, useReranker ? fusionTopK : finalTopK)
+    .map(fusedEntryToResult);
+
+  let finalResults: HybridSearchResult[];
+  if (useReranker && fusedResults.length > 0) {
+    const documents = fusedResults.map((r) => r.chunk_text);
+    const rerankResults = await rerank(query, documents, rerankerTopK);
+
+    const reranked = rerankResults.map((rr) => ({
+      ...fusedResults[rr.index],
+      rerank_score: rr.relevance_score,
+    }));
+
+    // Drop clearly irrelevant results so they never reach the LLM context
+    // (protects faithfulness), but always keep a minimum to protect recall.
+    finalResults =
+      MIN_RERANK_SCORE > 0
+        ? reranked.filter(
+            (r, i) =>
+              i < MIN_RERANK_KEEP || (r.rerank_score ?? 0) >= MIN_RERANK_SCORE
+          )
+        : reranked;
+  } else {
+    finalResults = fusedResults.slice(0, finalTopK);
+  }
+
+  return resolveParentChunks(finalResults);
+}
+
+/**
+ * Hybrid search: vector + keyword (+ optional graph) retrieval fused via RRF,
  * with optional cross-encoder reranking for higher precision.
  *
- * Pipeline: vector + keyword search → RRF fusion → (optional) reranker → final results
+ * Pipeline: multi-channel search → RRF fusion → (optional) reranker
+ *           → low-score cutoff → child→parent resolution → final results
  */
 export async function hybridSearch(
   query: string,
@@ -70,9 +182,8 @@ export async function hybridSearch(
   options: HybridSearchOptions = {}
 ): Promise<HybridSearchResult[]> {
   const {
-    fusionTopK = DEFAULT_FUSION_TOP_K,
-    rerankerTopK = DEFAULT_RERANKER_TOP_K,
-    useReranker = false,
+    useGraph = false,
+    graphTopK = DEFAULT_GRAPH_CHANNEL_TOP_K,
     queryRewriteMode,
   } = options;
 
@@ -97,64 +208,34 @@ export async function hybridSearch(
     }
   }
 
-  // Run searches in parallel (vector + keyword)
-  const searchPromises = [
+  // Run all retrieval channels in parallel. Graph search may fail
+  // independently (e.g. no graph built yet) without breaking the pipeline.
+  const [vectorResults, keywordResults, graphResults] = await Promise.all([
     vectorSearch(vectorQuery, knowledgeBaseId, vectorTopK),
     keywordSearch(keywordQuery, knowledgeBaseId, keywordTopK),
-  ] as const;
+    useGraph
+      ? graphSearch(query, knowledgeBaseId, graphTopK).catch((err) => {
+          console.error("Graph channel failed, continuing without it:", err);
+          return [];
+        })
+      : Promise.resolve([]),
+  ]);
 
-  const [vectorResults, keywordResults] = await Promise.all(searchPromises);
-
-  const resultLists: Array<{ results: { chunk_text: string; metadata?: unknown }[]; label: "vector" | "keyword" }> = [
-    { results: vectorResults, label: "vector" },
-    { results: keywordResults, label: "keyword" },
-  ];
-
-  const fused = reciprocalRankFusion(resultLists);
-
-  // Sort by fused score, take fusionTopK
-  const sorted = [...fused.entries()]
-    .sort((a, b) => b[1].score - a[1].score)
-    .slice(0, useReranker ? fusionTopK : finalTopK);
-
-  // Build result array
-  const fusedResults: HybridSearchResult[] = sorted.map(
-    ([chunk_text, { score, sources, metadata }]) => ({
-      chunk_text,
-      score,
-      source: sources.size > 1 ? "both" : ([...sources][0] as "vector" | "keyword"),
-      metadata: metadata ?? null,
-    })
-  );
-
-  // Optional: apply cross-encoder reranker for higher precision
-  let finalResults: HybridSearchResult[];
-  if (useReranker && fusedResults.length > 0) {
-    const documents = fusedResults.map((r) => r.chunk_text);
-    const rerankResults = await rerank(query, documents, rerankerTopK);
-
-    finalResults = rerankResults.map((rr) => {
-      const original = fusedResults[rr.index];
-      return {
-        chunk_text: original.chunk_text,
-        score: original.score,
-        source: original.source,
-        rerank_score: rr.relevance_score,
-        metadata: original.metadata,
-      };
-    });
-  } else {
-    finalResults = fusedResults.slice(0, finalTopK);
+  const resultLists: Array<{ results: ChannelResult[]; label: ChannelLabel }> =
+    [
+      { results: vectorResults, label: "vector" },
+      { results: keywordResults, label: "keyword" },
+    ];
+  if (graphResults.length > 0) {
+    resultLists.push({ results: graphResults, label: "graph" });
   }
 
-  // Resolve child chunks → parent chunks
-  finalResults = await resolveParentChunks(finalResults);
-
-  return finalResults;
+  return fuseAndFinalize(query, resultLists, finalTopK, options);
 }
 
 /**
- * Expand search: run hybrid search for each sub-query and merge results via RRF.
+ * Expand search: run hybrid search for the original query AND each sub-query,
+ * then merge all results via a single RRF fusion.
  */
 async function expandSearch(
   originalQuery: string,
@@ -165,86 +246,69 @@ async function expandSearch(
   finalTopK: number,
   options: HybridSearchOptions
 ): Promise<HybridSearchResult[]> {
-  const { useReranker = false, fusionTopK = DEFAULT_FUSION_TOP_K, rerankerTopK = DEFAULT_RERANKER_TOP_K } = options;
+  // Always include the original query — sub-queries complement it,
+  // they should not replace it.
+  const queries = [originalQuery, ...subQueries.filter((q) => q !== originalQuery)];
 
-  // Run searches for each sub-query in parallel
   const allResults = await Promise.all(
-    subQueries.map(async (subQuery) => {
+    queries.map(async (q) => {
       const [vec, kw] = await Promise.all([
-        vectorSearch(subQuery, knowledgeBaseId, vectorTopK),
-        keywordSearch(subQuery, knowledgeBaseId, keywordTopK),
+        vectorSearch(q, knowledgeBaseId, vectorTopK),
+        keywordSearch(q, knowledgeBaseId, keywordTopK),
       ]);
       return { vec, kw };
     })
   );
 
-  // Merge all results into a single RRF fusion
-  const resultLists: Array<{ results: { chunk_text: string; metadata?: unknown }[]; label: "vector" | "keyword" }> = [];
+  const resultLists: Array<{ results: ChannelResult[]; label: ChannelLabel }> =
+    [];
   for (const { vec, kw } of allResults) {
     resultLists.push({ results: vec, label: "vector" });
     resultLists.push({ results: kw, label: "keyword" });
   }
 
-  const fused = reciprocalRankFusion(resultLists);
-  const sorted = [...fused.entries()]
-    .sort((a, b) => b[1].score - a[1].score)
-    .slice(0, useReranker ? fusionTopK : finalTopK);
-
-  const fusedResults: HybridSearchResult[] = sorted.map(
-    ([chunk_text, { score, sources, metadata }]) => ({
-      chunk_text,
-      score,
-      source: sources.size > 1 ? "both" : ([...sources][0] as "vector" | "keyword"),
-      metadata: metadata ?? null,
-    })
-  );
-
-  if (useReranker && fusedResults.length > 0) {
-    const documents = fusedResults.map((r) => r.chunk_text);
-    const rerankResults = await rerank(originalQuery, documents, rerankerTopK);
-    return resolveParentChunks(rerankResults.map((rr) => {
-      const original = fusedResults[rr.index];
-      return {
-        chunk_text: original.chunk_text,
-        score: original.score,
-        source: original.source,
-        rerank_score: rr.relevance_score,
-        metadata: original.metadata,
-      };
-    }));
+  if (options.useGraph) {
+    const graphResults = await graphSearch(
+      originalQuery,
+      knowledgeBaseId,
+      options.graphTopK ?? DEFAULT_GRAPH_CHANNEL_TOP_K
+    ).catch(() => []);
+    if (graphResults.length > 0) {
+      resultLists.push({ results: graphResults, label: "graph" });
+    }
   }
 
-  return resolveParentChunks(fusedResults.slice(0, finalTopK));
+  return fuseAndFinalize(originalQuery, resultLists, finalTopK, options);
 }
 
 /**
  * Resolve child chunks to their parent chunks.
  *
- * Strategy: for each child chunk, APPEND the parent's text rather than replace.
- * This preserves the original result count and ranking while enriching context.
- * Multiple children mapping to the same parent will be deduplicated —
- * only the highest-scoring child is kept, with the parent text appended.
+ * Multiple children mapping to the same parent are deduplicated —
+ * only the highest-scoring child is kept, promoted to the parent text.
+ * Results that are not document child chunks (parents, graph chunks)
+ * pass through unchanged.
  */
 async function resolveParentChunks(
   results: HybridSearchResult[]
 ): Promise<HybridSearchResult[]> {
   if (results.length === 0) return results;
 
-  const childTexts = results.map((r) => r.chunk_text);
+  const chunkIds = results.map((r) => r.chunk_id);
 
   const childRows = await prisma.$queryRawUnsafe<
-    { chunk_text: string; parent_chunk_id: string }[]
+    { id: string; parent_chunk_id: string }[]
   >(
-    `SELECT chunk_text, parent_chunk_id FROM document_chunks
-     WHERE chunk_text = ANY($1::text[]) AND parent_chunk_id IS NOT NULL`,
-    childTexts
+    `SELECT id, parent_chunk_id FROM document_chunks
+     WHERE id = ANY($1::uuid[]) AND parent_chunk_id IS NOT NULL`,
+    chunkIds
   );
 
   if (childRows.length === 0) return results;
 
   const childToParent = new Map<string, string>();
   for (const row of childRows) {
-    childToParent.set(row.chunk_text, row.parent_chunk_id);
+    childToParent.set(row.id, row.parent_chunk_id);
   }
 
   const parentIds = [...new Set(childToParent.values())];
@@ -261,21 +325,27 @@ async function resolveParentChunks(
     parentTextMap.set(row.id, row.chunk_text);
   }
 
-  // Deduplicate: if multiple children map to the same parent,
-  // keep only the highest-scoring one, with parent text appended.
+  // Deduplicate: if multiple children map to the same parent, keep only the
+  // highest-scoring one. When we promote a child to its parent we ALSO have
+  // to swap the chunk_id, otherwise the citation UI would point at the
+  // (smaller) child row instead of the displayed parent text.
   const deduped = new Map<string, HybridSearchResult>();
   const nonChildResults: HybridSearchResult[] = [];
 
   for (const result of results) {
-    const parentId = childToParent.get(result.chunk_text);
+    const parentId = childToParent.get(result.chunk_id);
     if (parentId && parentTextMap.has(parentId)) {
       const parentText = parentTextMap.get(parentId)!;
       const existing = deduped.get(parentId);
-      if (!existing || result.score > existing.score) {
+      if (
+        !existing ||
+        (result.rerank_score ?? result.score) >
+          (existing.rerank_score ?? existing.score)
+      ) {
         deduped.set(parentId, {
           ...result,
+          chunk_id: parentId,
           chunk_text: parentText,
-          source: result.source,
         });
       }
     } else {

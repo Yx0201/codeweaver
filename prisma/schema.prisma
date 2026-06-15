@@ -25,6 +25,10 @@ model conversation_message {
   conversation_id String       @db.Uuid
   role            String       @db.VarChar(50)
   content         String
+  // Per-message structured payload. For assistant messages we store the
+  // retrieved RAG references (index → chunk_id, file_id, filename, snippet,
+  // chunk_text) so the citation UI survives a page refresh.
+  metadata        Json?
   created_at      DateTime?    @default(now()) @db.Timestamp(6)
   conversation    conversation @relation(fields: [conversation_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
 

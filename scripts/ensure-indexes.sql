@@ -24,3 +24,9 @@ CREATE INDEX IF NOT EXISTS idx_kg_entity_name_embedding_hnsw
 -- 5. Knowledge graph: GIN index on entity name keywords
 CREATE INDEX IF NOT EXISTS idx_kg_entity_name_keywords_gin
   ON kg_entity USING gin (name_keywords);
+
+-- 6. Knowledge graph: composite unique index used by entity deduplication
+--    (resolveEntityId looks up knowledge_base_id + entity_type + lower(name);
+--     UNIQUE also guards against duplicate entities under concurrent ingestion)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_entity_kbid_type_lower_name
+  ON kg_entity (knowledge_base_id, entity_type, lower(name));

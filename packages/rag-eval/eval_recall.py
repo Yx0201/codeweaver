@@ -53,6 +53,9 @@ VECTOR_TOP_K = int(os.environ.get("VECTOR_TOP_K", "50"))
 KEYWORD_TOP_K = int(os.environ.get("KEYWORD_TOP_K", "50"))
 FINAL_TOP_K = int(os.environ.get("FINAL_TOP_K", "10"))
 
+# Retrieval mode: hybrid (reranker + graph channel) / fast / graph
+SEARCH_MODE = os.environ.get("SEARCH_MODE", "hybrid")
+
 # ---------------------------------------------------------------------------
 # Dataset loading
 # ---------------------------------------------------------------------------
@@ -157,8 +160,8 @@ _INLINE_DATASET = [
 # (identical to what the chat page uses)
 # ---------------------------------------------------------------------------
 
-def hybrid_search(query: str, knowledge_base_id: int) -> list[dict]:
-    """Call the Next.js hybrid search API (vector + keyword + RRF)."""
+def hybrid_search(query: str, knowledge_base_id: int, search_mode: str) -> list[dict]:
+    """Call the Next.js search API (vector + keyword + graph + RRF + reranker)."""
     resp = requests.post(
         f"{NEXTJS_BASE_URL}/api/vector-search",
         json={
@@ -167,8 +170,9 @@ def hybrid_search(query: str, knowledge_base_id: int) -> list[dict]:
             "vectorTopK": VECTOR_TOP_K,
             "keywordTopK": KEYWORD_TOP_K,
             "finalTopK": FINAL_TOP_K,
+            "searchMode": search_mode,
         },
-        timeout=120,
+        timeout=300,
     )
     resp.raise_for_status()
     return resp.json()["results"]
@@ -204,11 +208,53 @@ def generate_answer(query: str, system_prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Deterministic context hit rate (no LLM judge needed)
+# ---------------------------------------------------------------------------
+
+def _norm_text(s: str) -> str:
+    import re
+    return re.sub(r"[\s\u2018\u2019\u201c\u201d'\"“”‘’]", "", s)
+
+
+def compute_context_hit_rate(sample_list: list[dict]) -> dict:
+    """Fraction of reference_contexts found inside retrieved_contexts.
+
+    Uses 20-char shingle coverage (>= 0.8) after punctuation normalization,
+    so it tolerates minor whitespace/quote differences. This is a free,
+    deterministic retrieval-recall proxy that works even when the LLM
+    judge is unavailable.
+    """
+    total, hit = 0, 0
+    per_question = []
+    for s in sample_list:
+        retrieved = _norm_text(" ".join(s["retrieved_contexts"]))
+        q_total, q_hit = 0, 0
+        for ref in s["reference_contexts"]:
+            r = _norm_text(ref)
+            shingles = [r[i:i + 20] for i in range(0, max(1, len(r) - 19), 10)]
+            coverage = sum(1 for sh in shingles if sh in retrieved) / len(shingles)
+            q_total += 1
+            q_hit += coverage >= 0.8
+        total += q_total
+        hit += q_hit
+        per_question.append({
+            "question": s["user_input"],
+            "hit": q_hit,
+            "total": q_total,
+        })
+    return {
+        "context_hit_rate": round(hit / total, 4) if total else None,
+        "per_question": per_question,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Resolve knowledge base ID
 # ---------------------------------------------------------------------------
 
-def resolve_knowledge_base_id() -> int:
-    """Find the knowledge base via direct DB query."""
+def resolve_knowledge_base_id(kb: str | None = None) -> int:
+    """Resolve the knowledge base by id or name (--kb / EVAL_KB),
+    falling back to the first knowledge base with a warning."""
     import psycopg2
     from urllib.parse import urlparse
 
@@ -227,10 +273,23 @@ def resolve_knowledge_base_id() -> int:
     )
     try:
         with conn.cursor() as cur:
+            if kb:
+                if kb.isdigit():
+                    cur.execute("SELECT id, name FROM knowledge_base WHERE id = %s", (int(kb),))
+                else:
+                    cur.execute("SELECT id, name FROM knowledge_base WHERE name = %s", (kb,))
+                row = cur.fetchone()
+                if not row:
+                    print(f"ERROR: Knowledge base not found: {kb}")
+                    sys.exit(1)
+                print(f"Using knowledge base: id={row[0]}, name={row[1]}")
+                return row[0]
+
             cur.execute("SELECT id, name FROM knowledge_base ORDER BY id LIMIT 1")
             row = cur.fetchone()
             if row:
-                print(f"Using knowledge base: id={row[0]}, name={row[1]}")
+                print(f"WARNING: no --kb/EVAL_KB given, defaulting to first knowledge base: "
+                      f"id={row[0]}, name={row[1]} — make sure it matches the golden dataset!")
                 return row[0]
             print("ERROR: No knowledge base found.")
             sys.exit(1)
@@ -243,27 +302,38 @@ def resolve_knowledge_base_id() -> int:
 # ---------------------------------------------------------------------------
 
 async def run_evaluation():
-    # Support --dataset argument
+    # Support --dataset / --mode / --kb arguments
     dataset_name = None
-    for i, arg in enumerate(sys.argv[1:]):
-        if arg == "--dataset" and i + 1 < len(sys.argv[1:]):
-            dataset_name = sys.argv[i + 2]
-            break
+    search_mode = SEARCH_MODE
+    kb_arg = os.environ.get("EVAL_KB") or None
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg == "--dataset" and i + 1 < len(args):
+            dataset_name = args[i + 1]
+        elif arg == "--mode" and i + 1 < len(args):
+            search_mode = args[i + 1]
+        elif arg == "--kb" and i + 1 < len(args):
+            kb_arg = args[i + 1]
+
+    if search_mode not in ("hybrid", "fast", "graph"):
+        print(f"ERROR: invalid --mode '{search_mode}' (expected hybrid/fast/graph)")
+        sys.exit(1)
 
     golden_dataset = load_dataset(dataset_name)
 
     print("=" * 60)
-    print("  RAG Recall Evaluation (ragas) — Hybrid Retrieval")
+    print("  RAG Recall Evaluation (ragas)")
     print("=" * 60)
     print(f"Next.js URL:     {NEXTJS_BASE_URL}")
     print(f"Scoring LLM:     {RAGAS_EVAL_MODEL} (base={RAGAS_EVAL_BASE_URL})")
     print(f"Eval Embeddings: {EMBEDDING_MODEL} (local Ollama)")
+    print(f"Search Mode:     {search_mode}")
     print(f"Hybrid Top-K:    vector={VECTOR_TOP_K}, keyword={KEYWORD_TOP_K}, final={FINAL_TOP_K}")
     print(f"Golden Dataset:  {len(golden_dataset)} questions")
     print("=" * 60)
 
     # 1. Resolve knowledge base ID
-    kb_id = resolve_knowledge_base_id()
+    kb_id = resolve_knowledge_base_id(kb_arg)
 
     # 2. Run the RAG pipeline for each question
     print("\n[1/3] Running RAG pipeline to collect responses...")
@@ -272,8 +342,8 @@ async def run_evaluation():
         question = item["user_input"]
         print(f"  [{i+1}/{len(golden_dataset)}] {question}")
 
-        # Step 1: Hybrid search (vector + keyword + RRF)
-        search_results = hybrid_search(question, kb_id)
+        # Step 1: Retrieval (vector + keyword + graph + RRF + reranker)
+        search_results = hybrid_search(question, kb_id, search_mode)
         retrieved_contexts = [r["chunk_text"] for r in search_results]
 
         # Step 2: Build system prompt (same as chat page)
@@ -291,6 +361,13 @@ async def run_evaluation():
             "reference_contexts": item["reference_contexts"],
             "retrieved_contexts": retrieved_contexts,
         })
+
+    # 2.5 Deterministic retrieval hit rate (judge-independent)
+    hit_stats = compute_context_hit_rate(sample_list)
+    print("\n--- Deterministic Context Hit Rate (no judge) ---")
+    for pq in hit_stats["per_question"]:
+        print(f"  {pq['hit']}/{pq['total']}  {pq['question']}")
+    print(f"  TOTAL: {hit_stats['context_hit_rate']}")
 
     # 3. Build ragas EvaluationDataset
     print("\n[2/3] Building ragas EvaluationDataset...")
@@ -387,6 +464,29 @@ async def run_evaluation():
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     print(f"\nResults saved to: {output_path}")
+
+    # Append a compact summary to the history log so runs are comparable
+    # over time without diffing the (huge) eval_results.json.
+    from datetime import datetime
+
+    history_path = os.path.join(os.path.dirname(__file__), "eval_history.jsonl")
+    history_entry = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "search_mode": search_mode,
+        "knowledge_base_id": kb_id,
+        "dataset": dataset_name or "golden_v1",
+        "num_questions": len(golden_dataset),
+        "config": {
+            "vector_top_k": VECTOR_TOP_K,
+            "keyword_top_k": KEYWORD_TOP_K,
+            "final_top_k": FINAL_TOP_K,
+            "scoring_model": RAGAS_EVAL_MODEL,
+        },
+        "metric_averages": metric_averages,
+    }
+    with open(history_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(history_entry, ensure_ascii=False) + "\n")
+    print(f"Summary appended to: {history_path}")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useEffect, useState } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { FileText, Trash2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { deleteFileAction } from "@/actions/knowledge";
 import type { UploadPipelineState } from "@/lib/upload-processing";
+import { useUploadProgress } from "./upload-progress-context";
 
 interface FileItem {
   id: string;
@@ -92,7 +93,10 @@ function DeleteFileDialog({
         variant="ghost"
         size="icon-sm"
         className="text-muted-foreground hover:text-destructive shrink-0"
-        onClick={() => setOpen(true)}
+        onClick={(e) => {
+          e.stopPropagation();
+          setOpen(true);
+        }}
       >
         <Trash2 className="w-4 h-4" />
       </Button>
@@ -134,34 +138,85 @@ function DeleteFileDialog({
   );
 }
 
+function FileRow({
+  file,
+  knowledgeBaseId,
+}: {
+  file: FileItem;
+  knowledgeBaseId: number;
+}) {
+  const router = useRouter();
+  const { openPanel } = useUploadProgress();
+
+  // Processing → show the floating progress panel.
+  // Failed (with pipeline state) → also show the panel so the error is visible.
+  // Otherwise (completed / uploaded / unknown) → navigate to file preview.
+  const isInProgress =
+    file.status === "processing" ||
+    (file.status === "failed" && file.process !== null);
+
+  const handleClick = () => {
+    if (isInProgress) {
+      openPanel({
+        fileId: file.id,
+        filename: file.filename,
+        status: file.status ?? "processing",
+        process: file.process,
+      });
+      return;
+    }
+    router.push(`/knowledge/${knowledgeBaseId}/files/${file.id}`);
+  };
+
+  return (
+    // The clickable area is the inner <button>, NOT the whole Card. The
+    // delete trigger sits as a sibling outside the click target so the dialog
+    // open/close, form submit, and Radix focus-return can't accidentally
+    // navigate the row to the file preview (which would 404 for a just-deleted
+    // file).
+    <Card className="group transition-colors duration-200 hover:border-primary/40">
+      <CardContent className="flex items-center gap-3 py-3">
+        <button
+          type="button"
+          onClick={handleClick}
+          aria-label={
+            isInProgress
+              ? `查看 ${file.filename} 的处理进度`
+              : `打开 ${file.filename}`
+          }
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+        >
+          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border transition-colors group-hover:text-primary">
+            <FileText className="size-4.5" strokeWidth={1.75} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="font-medium truncate group-hover:underline">
+              {file.filename}
+            </p>
+            <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground tabular-nums">
+              <span>{file.fileSize}</span>
+              <span className="text-border">·</span>
+              <span>{file.uploadTime}</span>
+              <span className="text-border">·</span>
+              <StatusLabel status={file.status} process={file.process} />
+            </p>
+          </div>
+        </button>
+        <DeleteFileDialog file={file} knowledgeBaseId={knowledgeBaseId} />
+      </CardContent>
+    </Card>
+  );
+}
+
 export function FileList({ files, knowledgeBaseId }: FileListProps) {
   return (
     <div className="flex flex-col gap-2">
       {files.map((file) => (
-        <Card
+        <FileRow
           key={file.id}
-          className="group transition-colors duration-200 hover:border-primary/40"
-        >
-          <CardContent className="flex items-center gap-3 py-3">
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground ring-1 ring-border transition-colors group-hover:text-primary">
-              <FileText className="size-4.5" strokeWidth={1.75} />
-            </span>
-            <Link
-              href={`/knowledge/${knowledgeBaseId}/files/${file.id}`}
-              className="flex-1 min-w-0"
-            >
-              <p className="font-medium truncate group-hover:underline">{file.filename}</p>
-              <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-muted-foreground tabular-nums">
-                <span>{file.fileSize}</span>
-                <span className="text-border">·</span>
-                <span>{file.uploadTime}</span>
-                <span className="text-border">·</span>
-                <StatusLabel status={file.status} process={file.process} />
-              </p>
-            </Link>
-            <DeleteFileDialog file={file} knowledgeBaseId={knowledgeBaseId} />
-          </CardContent>
-        </Card>
+          file={file}
+          knowledgeBaseId={knowledgeBaseId}
+        />
       ))}
     </div>
   );

@@ -2,6 +2,9 @@ import { prisma } from "@/lib/prisma";
 import { generateEmbedding } from "@/lib/embedding";
 
 export interface SearchResult {
+  chunk_id: string;
+  file_id: string;
+  filename: string;
   chunk_text: string;
   similarity: number;
   metadata: unknown;
@@ -16,7 +19,11 @@ export async function vectorSearch(
   const vectorStr = `[${embedding.join(",")}]`;
 
   const results = await prisma.$queryRawUnsafe<SearchResult[]>(
-    `SELECT dc.chunk_text, dc.metadata,
+    `SELECT dc.id AS chunk_id,
+            dc.file_id,
+            uf.filename,
+            dc.chunk_text,
+            dc.metadata,
             1 - (dc.embedding <=> $1::vector) as similarity
      FROM document_chunks dc
      JOIN uploaded_files uf ON dc.file_id = uf.id

@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { Geist, Geist_Mono } from "next/font/google";
+import Script from "next/script";
 import { cn } from "@/lib/utils";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "@/components/layout/app-sidebar";
-import { Header } from "@/components/layout/header";
 import { ThemeProvider, themeInitScript } from "@/components/theme/theme-provider";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
@@ -33,10 +33,16 @@ export default function RootLayout({
         geistMono.variable
       )}
     >
-      <head>
-        <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
-      </head>
       <body className="h-full flex flex-col overflow-hidden bg-sidebar">
+        {/*
+          Theme init must run before paint to avoid a flash. next/script with
+          `beforeInteractive` is hoisted into <head> by Next during SSR and is
+          treated as an HTML element (not a React-rendered <script>), which
+          silences React 19's "script tag inside component" warning.
+        */}
+        <Script id="codeweaver-theme-init" strategy="beforeInteractive">
+          {themeInitScript}
+        </Script>
         {/* Fine grain overlay breaks digital flatness; never intercepts input. */}
         <div
           aria-hidden
@@ -48,10 +54,12 @@ export default function RootLayout({
         />
         <ThemeProvider>
           <TooltipProvider>
-            <SidebarProvider>
+            {/* open={false} locks the sidebar in its icon-only collapsed state;
+                with no trigger it can never expand — hover reveals the label
+                via each item's tooltip. */}
+            <SidebarProvider open={false}>
               <AppSidebar />
               <SidebarInset className="mt-2 mr-2 mb-2 border rounded-xl border-border bg-popover shadow-[var(--shadow-ambient)]">
-                <Header />
                 <main className="flex-1 overflow-auto flex flex-col">
                   {children}
                 </main>

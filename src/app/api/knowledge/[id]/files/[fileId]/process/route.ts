@@ -1,7 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@/generated/prisma/client";
 import { generateEmbeddings } from "@/lib/embedding";
-import { GRAPH_BUILD_CONCURRENCY } from "@/lib/config";
+import {
+  GRAPH_BUILD_CONCURRENCY,
+  GRAPH_BUILD_MIN_CONCURRENCY,
+  GRAPH_BUILD_MAX_CONCURRENCY,
+  EMBEDDING_BATCH_SIZE,
+} from "@/lib/config";
+import { consumeRateLimitHits } from "@/lib/graph-extractor";
+import { logGraphBuild } from "@/lib/graph-build-logger";
 import {
   cleanupKnowledgeGraph,
   prepareKnowledgeGraphChunkIngestion,
@@ -20,9 +27,7 @@ import {
   type UploadPipelineState,
 } from "@/lib/upload-processing";
 
-export const maxDuration = 60;
-
-const EMBEDDING_BATCH_SIZE = 8;
+export const maxDuration = 300;
 
 interface RouteParams {
   params: Promise<{ id: string; fileId: string }>;
@@ -33,13 +38,16 @@ async function updateFileProcess(
   state: UploadPipelineState,
   status: string = "processing"
 ) {
-  await prisma.uploaded_files.update({
-    where: { id: fileId },
-    data: {
-      status,
-      metadata: buildUploadMetadata(state) as unknown as Prisma.InputJsonValue,
-    },
-  });
+  // Merge (not replace) so sibling metadata keys like graph_build_stats survive.
+  await prisma.$executeRawUnsafe(
+    `UPDATE uploaded_files
+     SET status = $2,
+         metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb
+     WHERE id = $1::uuid`,
+    fileId,
+    status,
+    JSON.stringify(buildUploadMetadata(state))
+  );
 }
 
 async function runRetrievalSplitStage(fileId: string, content: string, state: UploadPipelineState) {
@@ -249,11 +257,35 @@ async function runGraphSplitStage(
   return nextState;
 }
 
+interface GraphBuildStats {
+  startedAt?: string;
+  successCount?: number;
+  failCount?: number;
+  totalExtractMs?: number;
+  concurrency?: number;
+}
+
+function readGraphBuildStats(metadata: unknown): GraphBuildStats {
+  if (metadata && typeof metadata === "object") {
+    const stats = (metadata as Record<string, unknown>).graph_build_stats;
+    if (stats && typeof stats === "object") return stats as GraphBuildStats;
+  }
+  return {};
+}
+
 async function runGraphBuildStage(
   knowledgeBaseId: number,
   fileId: string,
+  fileMetadata: unknown,
   state: UploadPipelineState
 ) {
+  const stats = readGraphBuildStats(fileMetadata);
+  const concurrency = Math.min(
+    Math.max(stats.concurrency ?? GRAPH_BUILD_CONCURRENCY, GRAPH_BUILD_MIN_CONCURRENCY),
+    GRAPH_BUILD_MAX_CONCURRENCY
+  );
+  const startedAt = stats.startedAt ?? new Date().toISOString();
+
   const rows = await prisma.$queryRawUnsafe<{ id: string; chunk_text: string }[]>(
     `SELECT id, chunk_text
      FROM graph_chunks
@@ -262,22 +294,45 @@ async function runGraphBuildStage(
      ORDER BY chunk_order ASC
      LIMIT $2`,
     fileId,
-    GRAPH_BUILD_CONCURRENCY
+    concurrency
   );
+
+  await logGraphBuild(fileId, {
+    event: "batch_start",
+    concurrency,
+    chunkCount: rows.length,
+  });
+
+  const batchStart = Date.now();
+  consumeRateLimitHits(); // reset counter for this batch
 
   const extractedRows = await Promise.all(
     rows.map(async (row) => {
+      const chunkStart = Date.now();
       let graphError: string | null = null;
       let extraction: KnowledgeGraphChunkIngestion | null = null;
 
       try {
         extraction = await prepareKnowledgeGraphChunkIngestion(row.chunk_text);
+        await logGraphBuild(fileId, {
+          event: "chunk_done",
+          chunkId: row.id,
+          ms: Date.now() - chunkStart,
+          entities: extraction.entities.length,
+          relations: extraction.relations.length,
+        });
       } catch (error) {
         graphError = error instanceof Error ? error.message : "未知图谱构建错误";
         console.warn(`Graph chunk extraction skipped for ${row.id}: ${graphError}`);
+        await logGraphBuild(fileId, {
+          event: "chunk_failed",
+          chunkId: row.id,
+          ms: Date.now() - chunkStart,
+          error: graphError,
+        });
       }
 
-      return { row, extraction, graphError };
+      return { row, extraction, graphError, ms: Date.now() - chunkStart };
     })
   );
 
@@ -310,6 +365,18 @@ async function runGraphBuildStage(
     );
   }
 
+  const batchMs = Date.now() - batchStart;
+  const batchSuccess = extractedRows.filter((r) => !r.graphError).length;
+  const batchFail = extractedRows.length - batchSuccess;
+  const batchExtractMs = extractedRows.reduce((sum, r) => sum + r.ms, 0);
+
+  // AIMD concurrency control: halve on rate limiting, +1 on a clean batch.
+  const rateLimitHits = consumeRateLimitHits();
+  const nextConcurrency =
+    rateLimitHits > 0
+      ? Math.max(GRAPH_BUILD_MIN_CONCURRENCY, Math.floor(concurrency / 2))
+      : Math.min(GRAPH_BUILD_MAX_CONCURRENCY, concurrency + 1);
+
   const remainingRows = await prisma.$queryRawUnsafe<{ count: number }[]>(
     `SELECT COUNT(*)::int AS count
      FROM graph_chunks
@@ -318,6 +385,47 @@ async function runGraphBuildStage(
     fileId
   );
   const remaining = remainingRows[0]?.count ?? 0;
+
+  await logGraphBuild(fileId, {
+    event: "batch_done",
+    successCount: batchSuccess,
+    failCount: batchFail,
+    ms: batchMs,
+    rateLimitHits,
+    nextConcurrency,
+    remaining,
+  });
+
+  const newStats: GraphBuildStats = {
+    startedAt,
+    successCount: (stats.successCount ?? 0) + batchSuccess,
+    failCount: (stats.failCount ?? 0) + batchFail,
+    totalExtractMs: (stats.totalExtractMs ?? 0) + batchExtractMs,
+    concurrency: nextConcurrency,
+  };
+
+  if (remaining === 0) {
+    const totalChunks = (newStats.successCount ?? 0) + (newStats.failCount ?? 0);
+    await logGraphBuild(fileId, {
+      event: "build_done",
+      totalChunks,
+      success: newStats.successCount ?? 0,
+      failed: newStats.failCount ?? 0,
+      failRate: totalChunks > 0 ? (newStats.failCount ?? 0) / totalChunks : 0,
+      totalExtractMs: newStats.totalExtractMs ?? 0,
+      wallClockMs: Date.now() - new Date(startedAt).getTime(),
+    });
+  }
+
+  // Persist stats alongside the pipeline state (merged into metadata later).
+  await prisma.$executeRawUnsafe(
+    `UPDATE uploaded_files
+     SET metadata = COALESCE(metadata, '{}'::jsonb)
+       || jsonb_build_object('graph_build_stats', $2::jsonb)
+     WHERE id = $1::uuid`,
+    fileId,
+    JSON.stringify(newStats)
+  );
   const graphBuiltChunks = Math.max(0, state.counts.graphChunks - remaining);
   const progress =
     state.counts.graphChunks === 0
@@ -445,7 +553,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
       nextState = await runGraphSplitStage(knowledgeBaseId, file.id, content, currentState);
       await updateFileProcess(file.id, nextState);
     } else if (currentState.stage === "graphBuild") {
-      nextState = await runGraphBuildStage(knowledgeBaseId, file.id, currentState);
+      nextState = await runGraphBuildStage(knowledgeBaseId, file.id, file.metadata, currentState);
       await updateFileProcess(file.id, nextState);
     } else if (currentState.stage === "finalize") {
       nextState = await runFinalizeStage(knowledgeBaseId, currentState);

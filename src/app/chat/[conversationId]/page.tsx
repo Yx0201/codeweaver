@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { ChatShell } from "../_components/chat-shell";
 import type { SearchMode } from "@/actions/conversation";
+import { readAssistantMetadata } from "@/lib/citations";
 
 export const dynamic = "force-dynamic";
 
@@ -31,12 +32,19 @@ export default async function ConversationPage({ params }: PageProps) {
 
   if (!conversation) redirect("/chat");
 
-  const initialMessages = messages.map((msg) => ({
-    id: msg.id,
-    role: msg.role as "user" | "assistant",
-    content: msg.content,
-    parts: [{ type: "text" as const, text: msg.content }],
-  }));
+  const initialMessages = messages.map((msg) => {
+    // For assistant rows we re-attach the references the chat route stored
+    // at `metadata` time so the citation list rehydrates after refresh.
+    const metadata =
+      msg.role === "assistant" ? readAssistantMetadata(msg.metadata) : undefined;
+    return {
+      id: msg.id,
+      role: msg.role as "user" | "assistant",
+      content: msg.content,
+      parts: [{ type: "text" as const, text: msg.content }],
+      ...(metadata ? { metadata } : {}),
+    };
+  });
 
   return (
     <ChatShell

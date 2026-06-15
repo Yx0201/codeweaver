@@ -29,6 +29,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { createConversation, type SearchMode } from "@/actions/conversation";
+import type { AssistantMessageMetadata } from "@/lib/citations";
+import { CitationList } from "./citation-list";
+import {
+  CitationAnchor,
+  preprocessCitations,
+} from "./citation-anchor";
+
+// Streamdown component overrides for assistant messages. Defined at module
+// scope so the object identity is stable across renders.
+const assistantStreamdownComponents = { a: CitationAnchor };
 
 interface KnowledgeBase {
   id: number;
@@ -41,6 +51,7 @@ interface InitialMessage {
   role: "user" | "assistant";
   content: string;
   parts: { type: "text"; text: string }[];
+  metadata?: AssistantMessageMetadata;
 }
 
 interface ChatInterfaceProps {
@@ -83,9 +94,6 @@ export function ChatInterface({
   const lastSubmittedTextRef = useRef<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Store the last system prompt for regenerate
-  const lastSystemPromptRef = useRef<string | undefined>(undefined);
-
   const kbId =
     selectedKbId && selectedKbId !== "none"
       ? parseInt(selectedKbId)
@@ -123,51 +131,6 @@ export function ChatInterface({
     }
   }, [status]);
 
-  /**
-   * Run the RAG pipeline: vector search → system prompt.
-   * This is the same sequence the evaluation script uses,
-   * ensuring identical behavior for users and tests.
-   */
-  const fetchRagContext = async (
-    query: string,
-    knowledgeBaseId: number
-  ): Promise<string | undefined> => {
-    // Step 1: Hybrid search (vector + keyword + RRF)
-    const searchRes = await fetch("/api/vector-search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        query,
-        knowledgeBaseId,
-        vectorTopK: 20,
-        keywordTopK: 20,
-        finalTopK: 10,
-        searchMode,
-      }),
-    });
-
-    if (!searchRes.ok) return undefined;
-
-    const { results } = await searchRes.json();
-    if (!results || results.length === 0) return undefined;
-
-    // Step 2: Build system prompt from retrieved contexts
-    const contexts: string[] = results.map(
-      (r: { chunk_text: string }) => r.chunk_text
-    );
-
-    const promptRes = await fetch("/api/system-prompt", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ contexts }),
-    });
-
-    if (!promptRes.ok) return undefined;
-
-    const { systemPrompt } = await promptRes.json();
-    return systemPrompt;
-  };
-
   const handleSubmit = async (message: PromptInputMessage) => {
     const text = message.text.trim();
     if (!text) return;
@@ -192,31 +155,32 @@ export function ChatInterface({
     let convId = conversationIdRef.current;
 
     try {
-      // First message in a new conversation: create the conversation record first
+      // First message in a new conversation: create the record first so the
+      // /api/chat call has a conversationId to persist messages against. This
+      // is a single DB insert (~tens of ms), not the slow path.
       if (!convId) {
         const conv = await createConversation(kbId, searchMode);
         convId = conv.id;
         conversationIdRef.current = convId;
-        // Notify parent: updates URL + starts title generation (non-blocking)
+        // URL update + title generation — both fire-and-forget, non-blocking.
         onConversationCreated(convId, text);
       }
 
-      // Pre-fetch RAG context (vector search + system prompt) if KB is selected
-      let systemPrompt: string | undefined;
-      if (kbId) {
-        systemPrompt = await fetchRagContext(text, kbId);
-        lastSystemPromptRef.current = systemPrompt;
-      } else {
-        lastSystemPromptRef.current = undefined;
-      }
-
+      // Fire the chat request immediately. useChat optimistically appends the
+      // user bubble + flips status to "submitted" (showing the loading dots)
+      // the moment sendMessage is called — so the user sees their message and
+      // the AI-thinking indicator without any wait.
+      //
+      // The RAG pipeline (vector search + query rewrite + system prompt) runs
+      // entirely inside /api/chat when we pass `knowledgeBaseId` without a
+      // pre-built `systemPrompt`. No client-side pre-fetch is needed, and
+      // therefore no UI is gated on it.
       void sendMessage(
         { text },
         {
           body: {
             conversationId: convId,
             ...(kbId ? { knowledgeBaseId: kbId } : {}),
-            ...(systemPrompt ? { systemPrompt } : {}),
             searchMode,
           },
         }
@@ -233,13 +197,33 @@ export function ChatInterface({
     regenerate({
       body: {
         conversationId: conversationIdRef.current,
-        ...(lastSystemPromptRef.current
-          ? { systemPrompt: lastSystemPromptRef.current }
-          : {}),
+        ...(kbId ? { knowledgeBaseId: kbId } : {}),
         searchMode,
       },
     });
   };
+
+  // Keep the "thinking" indicator visible from submit until the assistant's
+  // first token actually arrives. The server runs the full RAG pipeline
+  // (retrieval + rerank + system-prompt assembly) before the LLM emits any
+  // text, and the AI SDK flips status to "streaming" the instant the stream's
+  // `start` part lands — which is BEFORE the first token. Gating only on
+  // `status === "submitted"` therefore hides the loader during the (often long)
+  // retrieval→generation gap. So we also keep it while streaming has begun but
+  // the assistant message still has no text content.
+  const lastMessage = messages[messages.length - 1];
+  const lastAssistantText =
+    lastMessage?.role === "assistant"
+      ? lastMessage.parts
+          .filter(
+            (p): p is { type: "text"; text: string } => p.type === "text"
+          )
+          .map((p) => p.text)
+          .join("")
+      : "";
+  const isAssistantPending =
+    (status === "submitted" || status === "streaming") &&
+    lastAssistantText.trim().length === 0;
 
   return (
     <div className="w-full mx-auto p-6 relative h-full">
@@ -253,6 +237,30 @@ export function ChatInterface({
                     case "text": {
                       const isLastMessage =
                         messageIndex === messages.length - 1;
+                      const isAssistant = message.role === "assistant";
+                      // While the answer is still streaming we hold the
+                      // citation list back, so the body text renders first and
+                      // the references only appear once the answer is complete.
+                      const isStreamingThisMessage =
+                        isLastMessage &&
+                        (status === "submitted" || status === "streaming");
+                      // `metadata` is set either by initialMessages on first
+                      // load or by the server's messageMetadata stream chunk.
+                      const messageMetadata = (
+                        message as { metadata?: AssistantMessageMetadata }
+                      ).metadata;
+                      const references =
+                        isAssistant && messageMetadata?.references
+                          ? messageMetadata.references
+                          : [];
+                      const renderText =
+                        references.length > 0
+                          ? preprocessCitations(
+                              part.text,
+                              references.length,
+                              message.id
+                            )
+                          : part.text;
                       return (
                         <Fragment key={`${message.id}-${i}`}>
                           <Message from={message.role}>
@@ -270,10 +278,26 @@ export function ChatInterface({
                               )}
                             </div>
                             <MessageContent>
-                              <MessageResponse>{part.text}</MessageResponse>
+                              <MessageResponse
+                                components={
+                                  isAssistant
+                                    ? assistantStreamdownComponents
+                                    : undefined
+                                }
+                              >
+                                {renderText}
+                              </MessageResponse>
+                              {isAssistant &&
+                                references.length > 0 &&
+                                !isStreamingThisMessage && (
+                                  <CitationList
+                                    messageId={message.id}
+                                    references={references}
+                                  />
+                                )}
                             </MessageContent>
                           </Message>
-                          {message.role === "assistant" && isLastMessage && (
+                          {isAssistant && isLastMessage && (
                             <MessageActions>
                               <MessageAction
                                 onClick={handleRegenerate}
@@ -300,7 +324,7 @@ export function ChatInterface({
                 })}
               </Fragment>
             ))}
-            {status === "submitted" && (
+            {isAssistantPending && (
               <Message from="assistant">
                 <div className="w-full flex">
                   <div className="flex size-8 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
