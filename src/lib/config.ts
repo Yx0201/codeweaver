@@ -20,30 +20,54 @@ function readFloatEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-// --- Service URLs ---
-/** Base Ollama URL without trailing slash or /api suffix */
-export const OLLAMA_BASE_URL =
-  process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+// --- Zenmux (cloud OpenAI-compatible gateway) ---
+/**
+ * Primary cloud API endpoint for chat, embeddings, and graph extraction.
+ * Falls back to the RAGAS_EVAL_* vars so existing .env.local files keep
+ * working without any changes.
+ */
+export const ZENMUX_BASE_URL =
+  process.env.ZENMUX_BASE_URL ??
+  process.env.RAGAS_EVAL_BASE_URL ??
+  "https://zenmux.ai/api/v1";
 
-/** Ollama API URL (appends /api). Used by AI SDK provider and raw fetch calls. */
-export const OLLAMA_API_URL = `${OLLAMA_BASE_URL}/api`;
+export const ZENMUX_API_KEY =
+  process.env.ZENMUX_API_KEY ??
+  process.env.RAGAS_EVAL_API_KEY ??
+  "";
 
-// Use 127.0.0.1 (not localhost): Node's fetch may resolve localhost to ::1
-// while uvicorn binds IPv4 0.0.0.0 only, causing silent reranker fallback.
+// --- Cloud model names ---
+export const CHAT_MODEL =
+  process.env.CHAT_MODEL ?? "deepseek/deepseek-v4-flash";
+export const TITLE_MODEL =
+  process.env.TITLE_MODEL ?? "deepseek/deepseek-v4-flash";
+export const EMBEDDING_MODEL =
+  process.env.EMBEDDING_MODEL ?? "openai/text-embedding-3-small";
+/** Dimensions for text-embedding-3-small (matches vector(1024) DB column). */
+export const EMBEDDING_DIMENSIONS = readPositiveIntEnv("EMBEDDING_DIMENSIONS", 1024);
+
+export const QUERY_REWRITE_MODEL =
+  process.env.QUERY_REWRITE_MODEL ?? "deepseek/deepseek-v4-flash";
+
+// --- Reranker (Jina AI cloud — Jina-compatible /rerank API) ---
+export const JINA_API_KEY = process.env.JINA_API_KEY ?? "";
+/** Jina reranker endpoint (cloud). Falls back to a local Infinity service
+ *  via RERANKER_URL if JINA_API_KEY is not set. */
+export const JINA_RERANKER_URL = "https://api.jina.ai/v1/rerank";
+export const RERANKER_MODEL =
+  process.env.RERANKER_MODEL ?? "jina-reranker-v2-base-multilingual";
+/** Legacy local reranker URL — only used when JINA_API_KEY is absent. */
 export const RERANKER_URL =
   process.env.RERANKER_URL ?? "http://127.0.0.1:8081";
 
-// --- Model names ---
-export const CHAT_MODEL = process.env.CHAT_MODEL ?? "qwen3.5:9b";
-export const TITLE_MODEL = process.env.TITLE_MODEL ?? "qwen3:0.6b";
+// --- Ollama (local — only used by graph extractor fallback when no cloud key) ---
+/** Base Ollama URL without trailing slash or /api suffix */
+export const OLLAMA_BASE_URL =
+  process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
+/** Ollama API URL (appends /api). Used by graph extractor local fallback. */
+export const OLLAMA_API_URL = `${OLLAMA_BASE_URL}/api`;
 export const GRAPH_EXTRACT_MODEL =
   process.env.GRAPH_EXTRACT_MODEL ?? "qwen3.5:4b";
-export const QUERY_REWRITE_MODEL =
-  process.env.QUERY_REWRITE_MODEL ?? "qwen3:0.6b";
-export const EMBEDDING_MODEL =
-  process.env.EMBEDDING_MODEL ?? "bge-m3:latest";
-export const RERANKER_MODEL =
-  process.env.RERANKER_MODEL ?? "BAAI/bge-reranker-v2-m3";
 
 // --- Graph extraction provider (cloud OpenAI-compatible endpoint) ---
 /**
@@ -53,11 +77,9 @@ export const RERANKER_MODEL =
  * GRAPH_EXTRACT_USE_CLOUD=false.
  */
 export const GRAPH_EXTRACT_API_BASE_URL =
-  process.env.GRAPH_EXTRACT_API_BASE_URL ??
-  process.env.RAGAS_EVAL_BASE_URL ??
-  "https://zenmux.ai/api/v1";
+  process.env.GRAPH_EXTRACT_API_BASE_URL ?? ZENMUX_BASE_URL;
 export const GRAPH_EXTRACT_API_KEY =
-  process.env.GRAPH_EXTRACT_API_KEY ?? process.env.RAGAS_EVAL_API_KEY ?? "";
+  process.env.GRAPH_EXTRACT_API_KEY ?? ZENMUX_API_KEY;
 export const GRAPH_EXTRACT_CLOUD_MODEL =
   process.env.GRAPH_EXTRACT_CLOUD_MODEL ??
   process.env.RAGAS_EVAL_MODEL ??

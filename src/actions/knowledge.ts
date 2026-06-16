@@ -84,7 +84,8 @@ export async function deleteKnowledgeBaseAction(
     await prisma.knowledge_base.delete({ where: { id } });
     revalidatePath("/knowledge");
     return { success: true };
-  } catch {
+  } catch (err) {
+    console.error("[deleteKnowledgeBaseAction] id=%d", id, err);
     return { error: "删除失败，请重试" };
   }
 }

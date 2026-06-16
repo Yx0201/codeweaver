@@ -1,3 +1,4 @@
+export const dynamic = "force-dynamic";
 import { FolderOpen } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { CreateKnowledgeDialog } from "./_components/create-knowledge-dialog";

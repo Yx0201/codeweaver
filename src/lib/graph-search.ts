@@ -85,14 +85,17 @@ async function findMatchingEntities(
 ): Promise<string[]> {
   const entityIds = new Set<string>();
 
-  // Keyword match (exact / fuzzy / alias) for all names in one query
+  // Keyword match (exact / fuzzy / alias) for all names in one query.
+  // pg_trgm similarity() replaces the former plainto_tsquery('jiebacfg', ...)
+  // clause and works without any custom extensions — useful on managed Postgres
+  // (Neon) where pgjieba is unavailable.
   const keywordRows = await prisma.$queryRawUnsafe<{ id: string }[]>(
     `SELECT DISTINCT e.id
      FROM kg_entity e
      JOIN unnest($2::text[]) AS q(name) ON
        e.name ILIKE '%' || q.name || '%'
        OR q.name ILIKE '%' || e.name || '%'
-       OR e.name_keywords @@ plainto_tsquery('jiebacfg', q.name)
+       OR similarity(e.name, q.name) > 0.25
      WHERE e.knowledge_base_id = $1
      LIMIT $3`,
     knowledgeBaseId,

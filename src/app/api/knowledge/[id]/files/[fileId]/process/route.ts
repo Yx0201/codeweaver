@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@/generated/prisma/client";
 import { generateEmbeddings } from "@/lib/embedding";
+import { toTsvectorInput } from "@/lib/tokenizer";
 import {
   GRAPH_BUILD_CONCURRENCY,
   GRAPH_BUILD_MIN_CONCURRENCY,
@@ -81,11 +82,14 @@ async function runRetrievalSplitStage(fileId: string, content: string, state: Up
     childChunkCount += parent.childChunks.length;
 
     for (let index = 0; index < parent.childChunks.length; index += 1) {
+      const chunkText = parent.childChunks[index];
+      const tokenized = toTsvectorInput(chunkText);
       await prisma.$executeRawUnsafe(
         `INSERT INTO document_chunks (file_id, chunk_text, keywords, chunk_order, chunk_type, parent_chunk_id, metadata)
-         VALUES ($1::uuid, $2, to_tsvector('jiebacfg', $2), $3, 'child', $4::uuid, $5::jsonb)`,
+         VALUES ($1::uuid, $2, to_tsvector('simple', $3), $4, 'child', $5::uuid, $6::jsonb)`,
         fileId,
-        parent.childChunks[index],
+        chunkText,
+        tokenized,
         index,
         parentId,
         JSON.stringify({

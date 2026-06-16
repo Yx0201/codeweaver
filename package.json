@@ -12,9 +12,11 @@
     "setup:python": "bash packages/rag-eval/setup.sh"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^2.0.50",
     "@ai-sdk/react": "^3.0.143",
     "@antv/g6": "^5.1.0",
     "@langchain/textsplitters": "^1.0.1",
+    "@node-rs/jieba": "^2.0.1",
     "@prisma/adapter-pg": "^7.6.0",
     "@prisma/client": "^7.6.0",
     "@streamdown/cjk": "^1.0.3",

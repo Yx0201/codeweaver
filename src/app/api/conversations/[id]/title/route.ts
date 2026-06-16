@@ -18,12 +18,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
   try {
     const { text } = await generateText({
       model,
-      // `/no_think` disables Qwen3's reasoning mode for this turn. The
-      // default title model (qwen3:0.6b) is a reasoning model — without
-      // this directive its short output window gets consumed by <think>…
-      // reasoning and the actual title never appears (or gets truncated
-      // mid-think and leaks into the UI as the title).
-      prompt: `请用简短的标题（不超过10个字）概括以下消息的主题，只输出标题本身，不加引号、标点或解释：\n\n${userMessage}\n\n/no_think`,
+      prompt: `请用简短的标题（不超过10个字）概括以下消息的主题，只输出标题本身，不加引号、标点或解释：\n\n${userMessage}`,
+      maxOutputTokens: 30,
     });
 
     const cleaned = text

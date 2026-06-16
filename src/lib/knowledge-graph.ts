@@ -6,6 +6,7 @@ import {
 } from "@/lib/graph-extractor";
 import { generateEmbedding } from "@/lib/embedding";
 import { ENTITY_MERGE_SIMILARITY } from "@/lib/config";
+import { toTsvectorInput } from "@/lib/tokenizer";
 
 const MAX_GRAPH_NODES = 80;
 const MAX_GRAPH_EDGES = 160;
@@ -200,14 +201,15 @@ async function resolveEntityId(
       const embedding = await generateEmbedding(normalizedName);
       vector = `[${embedding.join(",")}]`;
     }
+    const tokenizedName = toTsvectorInput(normalizedName);
     await prisma.$executeRawUnsafe(
       `UPDATE kg_entity
        SET name_embedding = $2::vector,
-           name_keywords = to_tsvector('jiebacfg', $3)
+           name_keywords = to_tsvector('simple', $3)
        WHERE id = $1::uuid`,
       created.id,
       vector,
-      normalizedName
+      tokenizedName
     );
   } catch (error) {
     console.error("Failed to enrich knowledge graph entity:", error);
@@ -226,6 +228,22 @@ async function addEntityAlias(
   alias: string
 ): Promise<void> {
   try {
+    // Fetch existing aliases so we can rebuild name_keywords to include them all.
+    const rows = await prisma.$queryRawUnsafe<{ metadata: unknown }[]>(
+      `SELECT metadata FROM kg_entity WHERE id = $1::uuid LIMIT 1`,
+      entityId
+    );
+    const meta = rows[0]?.metadata as Record<string, unknown> | null;
+    const existingAliases = Array.isArray(meta?.aliases)
+      ? (meta.aliases as string[])
+      : [];
+
+    // Pre-tokenize every name (canonical + new alias + prior aliases) and join.
+    // Passing space-joined token strings to to_tsvector('simple', ...) stores
+    // each token verbatim — no extra stemming needed.
+    const allNames = [canonicalName, alias, ...existingAliases];
+    const tokenizedAll = allNames.map((n) => toTsvectorInput(n)).join(" ");
+
     await prisma.$executeRawUnsafe(
       `UPDATE kg_entity
        SET metadata = jsonb_set(
@@ -238,19 +256,11 @@ async function addEntityAlias(
                ) v
              )
            ),
-           name_keywords = to_tsvector(
-             'jiebacfg',
-             $3 || ' ' || (
-               SELECT COALESCE(string_agg(v, ' '), '')
-               FROM jsonb_array_elements_text(
-                 COALESCE(metadata -> 'aliases', '[]'::jsonb) || to_jsonb(ARRAY[$2::text])
-               ) v
-             )
-           )
+           name_keywords = to_tsvector('simple', $3)
        WHERE id = $1::uuid`,
       entityId,
       alias,
-      canonicalName
+      tokenizedAll
     );
   } catch (error) {
     console.error("Failed to record entity alias:", error);
