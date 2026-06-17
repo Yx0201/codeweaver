@@ -169,16 +169,22 @@ async function runEmbeddingStage(fileId: string, state: UploadPipelineState) {
   if (rows.length > 0) {
     const embeddings = await generateEmbeddings(rows.map((row) => row.chunk_text));
 
-    for (let index = 0; index < rows.length; index += 1) {
-      const vector = `[${embeddings[index].join(",")}]`;
-      await prisma.$executeRawUnsafe(
-        `UPDATE document_chunks
-         SET embedding = $2::vector
-         WHERE id = $1::uuid`,
-        rows[index].id,
-        vector
-      );
-    }
+    // Single round-trip batch update: UPDATE ... FROM (VALUES ...) matches each
+    // row id to its vector, instead of one UPDATE statement per chunk.
+    const values: string[] = [];
+    const params: unknown[] = [];
+    rows.forEach((row, index) => {
+      const b = index * 2;
+      values.push(`($${b + 1}::uuid, $${b + 2}::vector)`);
+      params.push(row.id, `[${embeddings[index].join(",")}]`);
+    });
+    await prisma.$executeRawUnsafe(
+      `UPDATE document_chunks AS dc
+       SET embedding = v.embedding
+       FROM (VALUES ${values.join(", ")}) AS v(id, embedding)
+       WHERE dc.id = v.id`,
+      ...params
+    );
   }
 
   const remainingRows = await prisma.$queryRawUnsafe<{ count: number }[]>(
@@ -232,17 +238,33 @@ async function runGraphSplitStage(
   });
   await cleanupKnowledgeGraph(knowledgeBaseId);
 
-  for (const chunk of graphChunks) {
-    await prisma.graph_chunks.create({
-      data: {
-        file_id: fileId,
-        chunk_text: chunk.text,
-        chunk_order: chunk.order,
-        chapter_title: chunk.chapterTitle,
-        volume_title: chunk.volumeTitle,
-        metadata: chunk.metadata as Prisma.InputJsonValue,
-      },
+  // Batch-insert all graph chunks in chunked multi-row INSERTs. On a remote
+  // database (Neon) each statement is a network round-trip, so inserting
+  // hundreds of rows one-by-one is what stalled this stage.
+  const GRAPH_INSERT_BATCH = 100;
+  for (let start = 0; start < graphChunks.length; start += GRAPH_INSERT_BATCH) {
+    const batch = graphChunks.slice(start, start + GRAPH_INSERT_BATCH);
+    const values: string[] = [];
+    const params: unknown[] = [];
+    batch.forEach((chunk, i) => {
+      const b = i * 6;
+      values.push(
+        `($${b + 1}::uuid, $${b + 2}, $${b + 3}, $${b + 4}, $${b + 5}, $${b + 6}::jsonb)`
+      );
+      params.push(
+        fileId,
+        chunk.text,
+        chunk.order,
+        chunk.chapterTitle ?? null,
+        chunk.volumeTitle ?? null,
+        JSON.stringify(chunk.metadata ?? {})
+      );
     });
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO graph_chunks (file_id, chunk_text, chunk_order, chapter_title, volume_title, metadata)
+       VALUES ${values.join(", ")}`,
+      ...params
+    );
   }
 
   let nextState = updateStepState(state, "graphSplit", {
