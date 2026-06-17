@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
 import type { Prisma } from "@/generated/prisma/client";
 import { generateEmbeddings } from "@/lib/embedding";
 import { toTsvectorInput } from "@/lib/tokenizer";
@@ -60,10 +61,17 @@ async function runRetrievalSplitStage(fileId: string, content: string, state: Up
   });
 
   for (const parent of parents) {
-    const parentRows = await prisma.$queryRawUnsafe<{ id: string }[]>(
-      `INSERT INTO document_chunks (file_id, chunk_text, chunk_order, chunk_type, metadata)
-       VALUES ($1::uuid, $2, $3, 'parent', $4::jsonb)
-       RETURNING id`,
+    // Generate the parent id in the app layer instead of relying on
+    // `RETURNING id`. On Neon's serverless driver, depending on RETURNING to
+    // thread the id into the subsequent child inserts proved unreliable and
+    // produced parent_chunk_id values that violated the FK. An explicit UUID
+    // removes that dependency entirely.
+    const parentId = randomUUID();
+
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO document_chunks (id, file_id, chunk_text, chunk_order, chunk_type, metadata)
+       VALUES ($1::uuid, $2::uuid, $3, $4, 'parent', $5::jsonb)`,
+      parentId,
       fileId,
       parent.text,
       parent.order,
@@ -74,22 +82,25 @@ async function runRetrievalSplitStage(fileId: string, content: string, state: Up
       })
     );
 
-    const parentId = parentRows[0]?.id;
-    if (!parentId) {
-      throw new Error("检索父 chunk 写入失败");
-    }
-
     childChunkCount += parent.childChunks.length;
 
-    for (let index = 0; index < parent.childChunks.length; index += 1) {
-      const chunkText = parent.childChunks[index];
-      const tokenized = toTsvectorInput(chunkText);
-      await prisma.$executeRawUnsafe(
-        `INSERT INTO document_chunks (file_id, chunk_text, keywords, chunk_order, chunk_type, parent_chunk_id, metadata)
-         VALUES ($1::uuid, $2, to_tsvector('simple', $3), $4, 'child', $5::uuid, $6::jsonb)`,
+    if (parent.childChunks.length === 0) continue;
+
+    // Batch all children of this parent into a single multi-row INSERT —
+    // one network round-trip instead of N (Neon serverless charges a
+    // round-trip per statement, which is what stalled the split stage).
+    const values: string[] = [];
+    const params: unknown[] = [];
+    parent.childChunks.forEach((chunkText, index) => {
+      const base = index * 7;
+      values.push(
+        `($${base + 1}::uuid, $${base + 2}::uuid, $${base + 3}, to_tsvector('simple', $${base + 4}), $${base + 5}, 'child', $${base + 6}::uuid, $${base + 7}::jsonb)`
+      );
+      params.push(
+        randomUUID(),
         fileId,
         chunkText,
-        tokenized,
+        toTsvectorInput(chunkText),
         index,
         parentId,
         JSON.stringify({
@@ -100,7 +111,13 @@ async function runRetrievalSplitStage(fileId: string, content: string, state: Up
           parentOrder: parent.order,
         })
       );
-    }
+    });
+
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO document_chunks (id, file_id, chunk_text, keywords, chunk_order, chunk_type, parent_chunk_id, metadata)
+       VALUES ${values.join(", ")}`,
+      ...params
+    );
   }
 
   let nextState = updateStepState(state, "retrieval", {
