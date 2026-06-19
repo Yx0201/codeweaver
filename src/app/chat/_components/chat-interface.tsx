@@ -16,17 +16,19 @@ import {
   type PromptInputMessage,
   PromptInputTextarea,
   PromptInputSubmit,
+  PromptInputFooter,
+  PromptInputTools,
 } from "@/components/ai-elements/prompt-input";
 import { MessageResponse } from "@/components/ai-elements/message";
-import { RefreshCcwIcon, CopyIcon, BookOpen, Search, Bot, User } from "lucide-react";
+import { RefreshCcwIcon, CopyIcon, BookOpen, Bot, User } from "lucide-react";
 import { useChat } from "@ai-sdk/react";
 import { Fragment } from "react";
+import { cn } from "@/lib/utils";
 import {
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from "@/components/ui/select";
 import { createConversation, type SearchMode } from "@/actions/conversation";
 import type { AssistantMessageMetadata } from "@/lib/citations";
@@ -94,10 +96,28 @@ export function ChatInterface({
   const lastSubmittedTextRef = useRef<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Optimistic user bubble shown the instant the user hits send, BEFORE useChat's
+  // sendMessage appends the real message. This hides the new-conversation latency
+  // (createConversation awaits a remote-Neon insert before sendMessage can fire).
+  // It is rendered only while `status === "ready"` (the pre-send window); once
+  // sendMessage flips status to "submitted", useChat owns the bubble and the
+  // effect below clears this.
+  const [optimisticUserText, setOptimisticUserText] = useState<string | null>(
+    null
+  );
+
   const kbId =
     selectedKbId && selectedKbId !== "none"
       ? parseInt(selectedKbId)
       : undefined;
+
+  // Compact label for the knowledge-base trigger: the selected base's name,
+  // or a muted "知识库" prompt when none is active.
+  const selectedKb = knowledgeBases.find(
+    (kb) => String(kb.id) === selectedKbId
+  );
+  const kbActive = !!selectedKb && selectedKbId !== "none";
+  const kbLabel = selectedKb ? selectedKb.name : "知识库";
 
   const persistSettings = (updates: { knowledgeBaseId?: number | null; searchMode?: SearchMode }) => {
     const convId = conversationIdRef.current;
@@ -131,6 +151,20 @@ export function ChatInterface({
     }
   }, [status]);
 
+  // useChat appends the real user bubble + flips status to "submitted" the
+  // moment sendMessage is called. Once it has taken over, drop our optimistic
+  // copy so we never render two bubbles for the same message. (During the
+  // pre-send createConversation await, status is still "ready" so this stays
+  // put — which is exactly when we need the optimistic bubble visible.)
+  useEffect(() => {
+    if (
+      optimisticUserText &&
+      (status === "submitted" || status === "streaming")
+    ) {
+      setOptimisticUserText(null);
+    }
+  }, [status, optimisticUserText]);
+
   const handleSubmit = async (message: PromptInputMessage) => {
     const text = message.text.trim();
     if (!text) return;
@@ -147,6 +181,10 @@ export function ChatInterface({
     lastSubmittedTextRef.current = text;
     setIsSubmitting(true);
     setInput("");
+    // Show the user bubble + AI-loading immediately — BEFORE the (possibly slow)
+    // new-conversation insert. Without this, the message wouldn't render until
+    // createConversation resolves and sendMessage finally fires.
+    setOptimisticUserText(text);
 
     if (hasActiveResponse) {
       stop();
@@ -157,7 +195,8 @@ export function ChatInterface({
     try {
       // First message in a new conversation: create the record first so the
       // /api/chat call has a conversationId to persist messages against. This
-      // is a single DB insert (~tens of ms), not the slow path.
+      // is a single DB insert, but on remote Neon it can take hundreds of ms —
+      // which is exactly the latency the optimistic bubble above covers.
       if (!convId) {
         const conv = await createConversation(kbId, searchMode);
         convId = conv.id;
@@ -187,6 +226,11 @@ export function ChatInterface({
       ).catch((error) => {
         console.error("Chat send failed:", error);
       });
+    } catch (error) {
+      // createConversation (or sendMessage setup) failed before useChat took
+      // over — clear the optimistic bubble so it doesn't linger forever.
+      setOptimisticUserText(null);
+      console.error("Chat submit failed:", error);
     } finally {
       submittingRef.current = false;
       setIsSubmitting(false);
@@ -224,6 +268,19 @@ export function ChatInterface({
   const isAssistantPending =
     (status === "submitted" || status === "streaming") &&
     lastAssistantText.trim().length === 0;
+
+  // True while the model is actively producing a response — used to flip the
+  // submit button into a stop control and to relax the empty-input disable.
+  const isGenerating = status === "submitted" || status === "streaming";
+
+  // The optimistic bubble is shown only in the pre-send window (status "ready",
+  // i.e. before sendMessage has run). Once status flips, useChat renders the real
+  // bubble and the effect above clears `optimisticUserText`.
+  const showOptimisticBubble =
+    optimisticUserText !== null && status === "ready";
+  // Keep the AI-thinking dots up across the whole wait: the optimistic window
+  // (createConversation await) AND the useChat submitted/streaming window.
+  const showAssistantPending = optimisticUserText !== null || isAssistantPending;
 
   return (
     <div className="w-full mx-auto p-6 relative h-full">
@@ -324,7 +381,19 @@ export function ChatInterface({
                 })}
               </Fragment>
             ))}
-            {isAssistantPending && (
+            {showOptimisticBubble && (
+              <Message from="user">
+                <div className="w-full flex flex-row-reverse">
+                  <div className="flex size-8 items-center justify-center rounded-xl bg-secondary text-secondary-foreground ring-1 ring-border">
+                    <User className="size-4" strokeWidth={1.75} />
+                  </div>
+                </div>
+                <MessageContent>
+                  <MessageResponse>{optimisticUserText}</MessageResponse>
+                </MessageContent>
+              </Message>
+            )}
+            {showAssistantPending && (
               <Message from="assistant">
                 <div className="w-full flex">
                   <div className="flex size-8 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
@@ -344,52 +413,76 @@ export function ChatInterface({
           <ConversationScrollButton />
         </Conversation>
 
-        <div className="mt-4 w-full max-w-2xl mx-auto flex flex-col gap-2.5 shrink-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card/60 pl-2.5 pr-1.5 py-1">
-              <BookOpen className="size-3.5 text-muted-foreground shrink-0" />
-              <Select value={selectedKbId} onValueChange={handleKbChange}>
-                <SelectTrigger className="h-7 w-44 border-0 bg-transparent shadow-none focus-visible:ring-0">
-                  <SelectValue placeholder="选择知识库（可选）" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">不使用知识库</SelectItem>
-                  {knowledgeBases.map((kb) => (
-                    <SelectItem key={kb.id} value={String(kb.id)}>
-                      {kb.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex items-center gap-1.5 rounded-lg border border-border bg-card/60 pl-2.5 pr-1.5 py-1">
-              <Search className="size-3.5 text-muted-foreground shrink-0" />
-              <Select value={searchMode} onValueChange={(v) => handleSearchModeChange(v as SearchMode)}>
-                <SelectTrigger className="h-7 w-28 border-0 bg-transparent shadow-none focus-visible:ring-0">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {SEARCH_MODES.map((mode) => (
-                    <SelectItem key={mode.value} value={mode.value}>
-                      {mode.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <PromptInput onSubmit={handleSubmit} className="w-full relative">
+        <div className="mt-4 w-full max-w-2xl mx-auto shrink-0 animate-rise-in">
+          <PromptInput
+            onSubmit={handleSubmit}
+            className={cn(
+              "w-full",
+              // Unify the composer into one elevated surface: softer rounding
+              // + the theme's tinted ambient shadow on the InputGroup box.
+              "[&_[data-slot=input-group]]:rounded-2xl [&_[data-slot=input-group]]:shadow-[var(--shadow-ambient)]"
+            )}
+          >
             <PromptInputTextarea
               value={input}
-              placeholder="Say something..."
+              placeholder="输入你的问题…"
               onChange={(e) => setInput(e.currentTarget.value)}
-              className="pr-12"
             />
-            <PromptInputSubmit
-              disabled={isSubmitting || !input.trim()}
-              className="absolute bottom-1 right-1"
-            />
+            <PromptInputFooter className="flex-wrap gap-2">
+              {/* Toolbar: knowledge-base picker + retrieval-mode segmented control. */}
+              <PromptInputTools className="gap-1.5">
+                <Select value={selectedKbId} onValueChange={handleKbChange}>
+                  <SelectTrigger
+                    size="sm"
+                    className={cn(
+                      "gap-1.5 px-2 border-0 bg-transparent shadow-none focus-visible:ring-0",
+                      kbActive ? "text-foreground" : "text-muted-foreground"
+                    )}
+                  >
+                    <BookOpen className="size-3.5" />
+                    <span className="max-w-[10rem] truncate">{kbLabel}</span>
+                  </SelectTrigger>
+                  <SelectContent position="popper" sideOffset={4}>
+                    <SelectItem value="none">不使用知识库</SelectItem>
+                    {knowledgeBases.map((kb) => (
+                      <SelectItem key={kb.id} value={String(kb.id)}>
+                        {kb.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                {/* Only three fixed, short modes — a segmented control shows the
+                    active state at a glance instead of hiding it in a dropdown. */}
+                <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
+                  {SEARCH_MODES.map((mode) => {
+                    const active = searchMode === mode.value;
+                    return (
+                      <button
+                        key={mode.value}
+                        type="button"
+                        onClick={() => handleSearchModeChange(mode.value)}
+                        aria-pressed={active}
+                        className={cn(
+                          "h-6 rounded-[5px] px-2 text-xs font-medium transition-colors",
+                          active
+                            ? "bg-primary/15 text-primary ring-1 ring-primary/25"
+                            : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                        )}
+                      >
+                        {mode.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </PromptInputTools>
+
+              <PromptInputSubmit
+                status={status}
+                onStop={stop}
+                disabled={isSubmitting || (!isGenerating && !input.trim())}
+              />
+            </PromptInputFooter>
           </PromptInput>
         </div>
       </div>

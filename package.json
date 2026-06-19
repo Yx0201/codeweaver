@@ -14,7 +14,6 @@
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.50",
     "@ai-sdk/react": "^3.0.143",
-    "@antv/g6": "^5.1.0",
     "@langchain/textsplitters": "^1.0.1",
     "@neondatabase/serverless": "^1.1.0",
     "@node-rs/jieba": "^2.0.1",
