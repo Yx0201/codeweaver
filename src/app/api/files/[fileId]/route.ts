@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { getSignedDownloadUrl } from "@/lib/blob";
 
 interface RouteParams {
   params: Promise<{ fileId: string }>;
@@ -13,9 +14,11 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
     select: { blob_url: true, filename: true, mime_type: true, file_data: true },
   });
 
-  // 新数据:直接重定向到 Blob URL(走 CDN,不占服务器带宽)。
+  // 新数据:为 private blob 生成签名下载 URL 后重定向(走 CDN)。
   if (file?.blob_url) {
-    return NextResponse.redirect(file.blob_url, { status: 302 });
+    return NextResponse.redirect(getSignedDownloadUrl(file.blob_url), {
+      status: 302,
+    });
   }
 
   // 过渡兼容:存量记录只有 file_data(bytea),尚未迁移到 Blob。

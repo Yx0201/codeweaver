@@ -1,9 +1,11 @@
-import { put, del } from "@vercel/blob";
+import { put, del, getDownloadUrl } from "@vercel/blob";
 
 /**
  * Vercel Blob 对象存储封装。
  *
- * 原文(二进制)统一上传到 Blob,Neon 中只保留 blob_url。
+ * Store 为 private(私有)模式:原文二进制不可匿名访问,下载/预览需通过
+ * getDownloadUrl() 生成签名 URL。Neon 中只存 blob_url。
+ *
  * 分块/embedding/图谱构建所需的文本仍走 uploaded_files.content(上传时
  * 同步落库的 UTF-8 缓存),避免处理流水线每次都从远端 fetch。
  *
@@ -45,7 +47,7 @@ export async function uploadKnowledgeFile(
   const pathname = `kb/${knowledgeBaseId}/${filename}`;
 
   const blob = await put(pathname, body, {
-    access: "public",
+    access: "private",
     addRandomSuffix: true,
     contentType,
     cacheControlMaxAge: 60 * 60 * 24 * 365, // 一年,原文不变可长期缓存
@@ -57,6 +59,15 @@ export async function uploadKnowledgeFile(
     pathname: blob.pathname,
     contentType: blob.contentType,
   };
+}
+
+/**
+ * 为 private blob 生成即时签名下载 URL。
+ * 用于下载路由重定向、头像等需要直接访问 blob 内容的场景。
+ * 签名 URL 由当前 token 即时生成,无需额外参数。
+ */
+export function getSignedDownloadUrl(blobUrl: string): string {
+  return getDownloadUrl(blobUrl);
 }
 
 /**
