@@ -7,6 +7,7 @@ import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ThemeProvider, themeInitScript } from "@/components/theme/theme-provider";
+import { Analytics } from "@vercel/analytics/react";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono" });
@@ -67,6 +68,8 @@ export default function RootLayout({
             </SidebarProvider>
           </TooltipProvider>
         </ThemeProvider>
+        {/* Vercel Analytics — 自动上报 page view,仅在 Vercel 环境生效 */}
+        <Analytics />
       </body>
     </html>
   );
