@@ -28,6 +28,7 @@
     "@tabler/icons-react": "^3.41.1",
     "@vercel/analytics": "^2.0.1",
     "@vercel/blob": "^2.4.1",
+    "@vercel/speed-insights": "^2.0.0",
     "ai": "^6.0.141",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",

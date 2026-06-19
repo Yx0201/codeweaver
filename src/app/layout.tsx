@@ -8,6 +8,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ThemeProvider, themeInitScript } from "@/components/theme/theme-provider";
 import { Analytics } from "@vercel/analytics/react";
+import { SpeedInsights } from "@vercel/speed-insights/next"
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono" });
@@ -60,7 +61,7 @@ export default function RootLayout({
                 via each item's tooltip. */}
             <SidebarProvider open={false}>
               <AppSidebar />
-              <SidebarInset className="mt-2 mr-2 mb-2 border rounded-xl border-border bg-popover shadow-[var(--shadow-ambient)]">
+              <SidebarInset className="mt-2 mr-2 mb-2 border rounded-xl border-border bg-popover shadow-(--shadow-ambient)">
                 <main className="flex-1 overflow-auto flex flex-col">
                   {children}
                 </main>
@@ -70,6 +71,7 @@ export default function RootLayout({
         </ThemeProvider>
         {/* Vercel Analytics — 自动上报 page view,仅在 Vercel 环境生效 */}
         <Analytics />
+        <SpeedInsights />
       </body>
     </html>
   );
