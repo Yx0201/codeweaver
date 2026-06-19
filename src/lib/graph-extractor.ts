@@ -1,10 +1,7 @@
 import {
-  GRAPH_EXTRACT_MODEL,
   GRAPH_EXTRACT_API_BASE_URL,
   GRAPH_EXTRACT_API_KEY,
   GRAPH_EXTRACT_CLOUD_MODEL,
-  GRAPH_EXTRACT_USE_CLOUD,
-  OLLAMA_API_URL,
 } from "./config";
 import { jsonrepair } from "jsonrepair";
 import { z } from "zod";
@@ -19,8 +16,6 @@ const ENTITY_TYPE_VALUES = [
 
 type CanonicalEntityType = (typeof ENTITY_TYPE_VALUES)[number];
 
-const OLLAMA_GENERATE_URL = `${OLLAMA_API_URL}/generate`;
-const GRAPH_KEEP_ALIVE = "5m";
 
 const graphExtractSystemPrompt = `
 你是知识图谱抽取器。
@@ -121,10 +116,6 @@ function buildGraphExtractPrompt(chunkText: string): string {
 文本：
 ${chunkText}
 `.trim();
-}
-
-interface OllamaGenerateResponse {
-  response?: string;
 }
 
 const entitySchema = z.object({
@@ -362,53 +353,24 @@ async function callCloudChat(
   throw lastError instanceof Error ? lastError : new Error("云端图谱抽取失败");
 }
 
-async function callOllamaGenerate(body: Record<string, unknown>): Promise<string> {
-  const response = await fetch(OLLAMA_GENERATE_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Ollama generate 请求失败: ${response.status} ${response.statusText}`);
-  }
-
-  const data = (await response.json()) as OllamaGenerateResponse;
-  const text = data.response?.trim();
-
-  if (!text) {
-    throw new Error("Ollama generate 返回为空");
-  }
-
-  return text;
-}
-
 async function repairExtractionJson(rawResponse: string, errorMessage: string): Promise<string> {
-  return callOllamaGenerate({
-    model: GRAPH_EXTRACT_MODEL,
-    system: graphExtractSystemPrompt,
-    prompt: `
-下面这段 JSON 不合法，请修正成一个严格合法的 JSON。
-不要解释，不要 Markdown，不要 thinking，只输出 JSON 本体。
+  return callCloudChat(
+    [
+      { role: "system", content: graphExtractSystemPrompt },
+      {
+        role: "user",
+        content: `下面这段 JSON 不合法，请修正成一个严格合法的 JSON。
+不要解释，不要 Markdown，只输出 JSON 本体。
 
 错误信息：
 ${errorMessage}
 
 错误 JSON：
-${rawResponse}
-    `.trim(),
-    stream: false,
-    think: false,
-    format: graphExtractJsonSchema,
-    keep_alive: GRAPH_KEEP_ALIVE,
-    options: {
-      num_ctx: 4096,
-      num_predict: 512,
-      temperature: 0,
-      top_p: 0.8,
-      repeat_penalty: 1.05,
-    },
-  });
+${rawResponse}`.trim(),
+      },
+    ],
+    { jsonMode: true }
+  );
 }
 
 async function parseExtractionPayload(rawResponse: string): Promise<unknown> {
@@ -446,10 +408,7 @@ async function parseExtractionPayload(rawResponse: string): Promise<unknown> {
 export async function extractEntitiesAndRelations(
   chunkText: string
 ): Promise<ExtractionResult> {
-  if (GRAPH_EXTRACT_USE_CLOUD) {
-    return extractEntitiesAndRelationsCloud(chunkText);
-  }
-  return extractEntitiesAndRelationsLocal(chunkText);
+  return extractEntitiesAndRelationsCloud(chunkText);
 }
 
 async function extractEntitiesAndRelationsCloud(
@@ -477,62 +436,15 @@ async function extractEntitiesAndRelationsCloud(
   return parsed.data;
 }
 
-async function extractEntitiesAndRelationsLocal(
-  chunkText: string
-): Promise<ExtractionResult> {
-  const text = await callOllamaGenerate({
-    model: GRAPH_EXTRACT_MODEL,
-    system: graphExtractSystemPrompt,
-    prompt: buildGraphExtractPrompt(chunkText),
-    stream: false,
-    think: false,
-    format: graphExtractJsonSchema,
-    keep_alive: GRAPH_KEEP_ALIVE,
-    options: {
-      num_ctx: 4096,
-      num_predict: 512,
-      temperature: 0,
-      top_p: 0.8,
-      repeat_penalty: 1.05,
-    },
-  });
-
-  const parsedJson = await parseExtractionPayload(text);
-  const normalized = normalizeExtractionResult(parsedJson);
-  const parsed = extractionSchema.safeParse(normalized);
-
-  if (!parsed.success) {
-    throw new Error(`图谱抽取结果结构校验失败: ${parsed.error.message}`);
-  }
-
-  return parsed.data;
-}
-
 export async function extractQueryEntities(query: string): Promise<string[]> {
   try {
-    const text = GRAPH_EXTRACT_USE_CLOUD
-      ? await callCloudChat(
-          [
-            { role: "system", content: queryEntitySystemPrompt },
-            { role: "user", content: `查询：${query}\n\n请提取关键实体：` },
-          ],
-          { maxTokens: 128, jsonMode: false }
-        )
-      : await callOllamaGenerate({
-          model: GRAPH_EXTRACT_MODEL,
-          system: queryEntitySystemPrompt,
-          prompt: `查询：${query}\n\n请提取关键实体：`,
-          stream: false,
-          think: false,
-          keep_alive: GRAPH_KEEP_ALIVE,
-          options: {
-            num_ctx: 2048,
-            num_predict: 128,
-            temperature: 0,
-            top_p: 0.8,
-            repeat_penalty: 1.05,
-          },
-        });
+    const text = await callCloudChat(
+      [
+        { role: "system", content: queryEntitySystemPrompt },
+        { role: "user", content: `查询：${query}\n\n请提取关键实体：` },
+      ],
+      { maxTokens: 128, jsonMode: false }
+    );
 
     return text
       .split("\n")

@@ -4,7 +4,7 @@ import {
   type ExtractedEntity,
   type ExtractedRelation,
 } from "@/lib/graph-extractor";
-import { generateEmbedding } from "@/lib/embedding";
+import { generateEmbeddings } from "@/lib/embedding";
 import { ENTITY_MERGE_SIMILARITY } from "@/lib/config";
 import { toTsvectorInput } from "@/lib/tokenizer";
 
@@ -106,116 +106,193 @@ function dedupeRelations(relations: ExtractedRelation[]): ExtractedRelation[] {
 }
 
 /**
- * Resolve an extracted entity to a kg_entity row, deduplicating in 3 stages:
+ * Batch-resolve entities to kg_entity ids.
  *
- * 1. Exact match on canonical name OR any recorded alias (case-insensitive).
- * 2. Embedding similarity match: if the new name is highly similar
- *    (>= ENTITY_MERGE_SIMILARITY) to an existing entity of the same type,
- *    merge into it and record the new surface form as an alias.
- *    Aliases are folded into name_keywords so keyword/graph lookups match them.
- * 3. Otherwise create a new entity (reusing the embedding already computed).
+ * Compresses what used to be N×~4 round-trips (per entity: exact-match SELECT
+ * + embedding API + similarity SELECT + create) into ~5 round-trips total for
+ * the whole batch, regardless of entity count. On a remote database this is
+ * the difference between seconds and minutes per chunk.
+ *
+ * Stages (all batched):
+ *  1. One embedding API call for all names.
+ *  2. One SELECT for exact-name OR alias matches (any input name).
+ *  3. One vector-similarity SELECT (unnest + LATERAL) for the unresolved ones.
+ *  4. Concurrent alias merges for similarity hits (few).
+ *  5. One multi-row INSERT for genuinely new entities + one batch UPDATE for
+ *     their embeddings/keywords.
+ *
+ * Returns a map of `lowercase(name) -> entityId` covering every input entity
+ * that resolved (matched, merged, or created).
  */
-async function resolveEntityId(
+async function resolveEntityIds(
   knowledgeBaseId: number,
-  entity: ExtractedEntity
-): Promise<string | null> {
-  const normalizedName = normalizeName(entity.name);
-  if (!normalizedName) return null;
+  entities: ExtractedEntity[]
+): Promise<Map<string, string>> {
+  const idMap = new Map<string, string>();
 
-  // Stage 1: exact name or alias match
-  const existing = await prisma.$queryRawUnsafe<{ id: string; description: string | null }[]>(
-    `SELECT id, description
+  const items = entities
+    .map((e) => ({
+      name: normalizeName(e.name),
+      type: e.entity_type,
+      desc: e.description ?? null,
+    }))
+    .filter((it) => it.name);
+  if (items.length === 0) return idMap;
+
+  const lowerNames = items.map((it) => it.name.toLowerCase());
+  const lowerNameSet = new Set(lowerNames);
+
+  // Step 1: batch-embed all names (1 HTTP call instead of N).
+  const embeddings = await generateEmbeddings(items.map((it) => it.name));
+
+  // Step 2: batch exact-name / alias match (1 round-trip).
+  const exactRows = await prisma.$queryRawUnsafe<
+    {
+      id: string;
+      name: string;
+      description: string | null;
+      aliases: string[] | null;
+    }[]
+  >(
+    `SELECT id, name, description,
+            (SELECT array_agg(a) FROM jsonb_array_elements_text(COALESCE(metadata->'aliases','[]'::jsonb)) a) AS aliases
      FROM kg_entity
      WHERE knowledge_base_id = $1
-       AND entity_type = $2
        AND (
-         lower(name) = lower($3)
+         lower(name) = ANY($2::text[])
          OR EXISTS (
-           SELECT 1
-           FROM jsonb_array_elements_text(COALESCE(metadata -> 'aliases', '[]'::jsonb)) alias
-           WHERE lower(alias) = lower($3)
+           SELECT 1 FROM jsonb_array_elements_text(COALESCE(metadata->'aliases','[]'::jsonb)) a
+           WHERE lower(a) = ANY($2::text[])
          )
-       )
-     LIMIT 1`,
+       )`,
     knowledgeBaseId,
-    entity.entity_type,
-    normalizedName
+    lowerNames
   );
 
-  if (existing[0]?.id) {
-    if (entity.description && !existing[0].description) {
-      await prisma.kg_entity.update({
-        where: { id: existing[0].id },
-        data: {
-          description: entity.description,
-        },
-      });
+  // Map each matched canonical name / alias back to its entity id.
+  const descBackfill: { id: string; desc: string }[] = [];
+  for (const row of exactRows) {
+    const ln = row.name.toLowerCase();
+    if (lowerNameSet.has(ln)) {
+      idMap.set(ln, row.id);
+      if (!row.description) {
+        const item = items.find((it) => it.name.toLowerCase() === ln);
+        if (item?.desc) descBackfill.push({ id: row.id, desc: item.desc });
+      }
     }
-
-    return existing[0].id;
+    for (const alias of row.aliases ?? []) {
+      const al = alias.toLowerCase();
+      if (lowerNameSet.has(al)) idMap.set(al, row.id);
+    }
   }
 
-  // Stage 2: embedding-similarity merge into an existing entity
-  let vector: string | null = null;
-  try {
-    const embedding = await generateEmbedding(normalizedName);
-    vector = `[${embedding.join(",")}]`;
-
-    const similar = await prisma.$queryRawUnsafe<
-      { id: string; name: string; similarity: number }[]
-    >(
-      `SELECT id, name, 1 - (name_embedding <=> $3::vector) AS similarity
-       FROM kg_entity
-       WHERE knowledge_base_id = $1
-         AND entity_type = $2
-         AND name_embedding IS NOT NULL
-       ORDER BY name_embedding <=> $3::vector
-       LIMIT 1`,
-      knowledgeBaseId,
-      entity.entity_type,
-      vector
+  // Batch backfill missing descriptions on exact-matched entities.
+  if (descBackfill.length > 0) {
+    const vals = descBackfill
+      .map((_, i) => `($${i * 2 + 1}::uuid, $${i * 2 + 2})`)
+      .join(", ");
+    const params = descBackfill.flatMap((d) => [d.id, d.desc]);
+    await prisma.$executeRawUnsafe(
+      `UPDATE kg_entity AS e
+       SET description = v.descr
+       FROM (VALUES ${vals}) AS v(id, descr)
+       WHERE e.id = v.id AND e.description IS NULL`,
+      ...params
     );
-
-    const match = similar[0];
-    if (match && match.similarity >= ENTITY_MERGE_SIMILARITY) {
-      await addEntityAlias(match.id, match.name, normalizedName);
-      return match.id;
-    }
-  } catch (error) {
-    console.error("Entity similarity lookup failed:", error);
   }
 
-  // Stage 3: create a new entity
-  const created = await prisma.kg_entity.create({
-    data: {
-      knowledge_base_id: knowledgeBaseId,
-      name: normalizedName,
-      entity_type: entity.entity_type,
-      description: entity.description ?? null,
-    },
-    select: { id: true },
+  // Collect entities still unresolved (no exact/alias match).
+  const unresolvedIdx: number[] = [];
+  const unresolvedTypes: string[] = [];
+  const unresolvedVectors: string[] = [];
+  items.forEach((it, i) => {
+    if (!idMap.has(it.name.toLowerCase())) {
+      unresolvedIdx.push(i);
+      unresolvedTypes.push(it.type);
+      unresolvedVectors.push(`[${embeddings[i].join(",")}]`);
+    }
   });
 
-  try {
-    if (!vector) {
-      const embedding = await generateEmbedding(normalizedName);
-      vector = `[${embedding.join(",")}]`;
+  if (unresolvedIdx.length === 0) return idMap;
+
+  // Step 3: batch vector-similarity match for unresolved entities (1 round-trip).
+  const simRows = await prisma.$queryRawUnsafe<
+    { idx: number; id: string; name: string; sim: number }[]
+  >(
+    `SELECT q.idx, e.id, e.name, 1 - (e.name_embedding <=> q.emb) AS sim
+     FROM unnest($1::int[], $2::text[], $3::vector[]) AS q(idx, etype, emb)
+     CROSS JOIN LATERAL (
+       SELECT id, name, name_embedding
+       FROM kg_entity
+       WHERE knowledge_base_id = $4
+         AND entity_type = q.etype
+         AND name_embedding IS NOT NULL
+       ORDER BY name_embedding <=> q.emb
+       LIMIT 1
+     ) e`,
+    unresolvedIdx,
+    unresolvedTypes,
+    unresolvedVectors,
+    knowledgeBaseId
+  );
+
+  const simByOrigIdx = new Map<number, { id: string; name: string; sim: number }>();
+  for (const r of simRows) simByOrigIdx.set(r.idx, { id: r.id, name: r.name, sim: r.sim });
+
+  const toMerge: { entityId: string; canonicalName: string; alias: string }[] = [];
+  const toCreate: { name: string; type: string; vector: string }[] = [];
+
+  unresolvedIdx.forEach((origIdx, pos) => {
+    const item = items[origIdx];
+    const match = simByOrigIdx.get(origIdx);
+    if (match && match.sim >= ENTITY_MERGE_SIMILARITY) {
+      idMap.set(item.name.toLowerCase(), match.id);
+      toMerge.push({ entityId: match.id, canonicalName: match.name, alias: item.name });
+    } else {
+      toCreate.push({ name: item.name, type: item.type, vector: unresolvedVectors[pos] });
     }
-    const tokenizedName = toTsvectorInput(normalizedName);
-    await prisma.$executeRawUnsafe(
-      `UPDATE kg_entity
-       SET name_embedding = $2::vector,
-           name_keywords = to_tsvector('simple', $3)
-       WHERE id = $1::uuid`,
-      created.id,
-      vector,
-      tokenizedName
+  });
+
+  // Step 4: concurrent alias merges (few of these; different entity ids → safe).
+  if (toMerge.length > 0) {
+    await Promise.all(
+      toMerge.map((m) => addEntityAlias(m.entityId, m.canonicalName, m.alias))
     );
-  } catch (error) {
-    console.error("Failed to enrich knowledge graph entity:", error);
   }
 
-  return created.id;
+  // Step 5: batch-create genuinely new entities, then batch-backfill embeddings.
+  if (toCreate.length > 0) {
+    const insVals = toCreate
+      .map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`)
+      .join(", ");
+    const insParams = toCreate.flatMap((c) => [knowledgeBaseId, c.name, c.type]);
+    const created = await prisma.$queryRawUnsafe<{ id: string; name: string }[]>(
+      `INSERT INTO kg_entity (knowledge_base_id, name, entity_type)
+       VALUES ${insVals}
+       RETURNING id, name`,
+      ...insParams
+    );
+
+    created.forEach((row) => idMap.set(row.name.toLowerCase(), row.id));
+
+    const upVals = created
+      .map((_, i) => `($${i * 3 + 1}::uuid, $${i * 3 + 2}::vector, $${i * 3 + 3})`)
+      .join(", ");
+    const upParams: unknown[] = [];
+    created.forEach((row, i) => {
+      upParams.push(row.id, toCreate[i].vector, toTsvectorInput(toCreate[i].name));
+    });
+    await prisma.$executeRawUnsafe(
+      `UPDATE kg_entity AS e
+       SET name_embedding = v.emb,
+           name_keywords = to_tsvector('simple', v.kw)
+       FROM (VALUES ${upVals}) AS v(id, emb, kw)
+       WHERE e.id = v.id`,
+      ...upParams
+    );
+  }
+
+  return idMap;
 }
 
 /**
@@ -305,64 +382,90 @@ export async function writeKnowledgeGraphChunkIngestion(params: {
     return;
   }
 
-  const entityIds = new Map<string, string>();
+  // Resolve all entities in one batched pass (see resolveEntityIds).
+  const idMap = await resolveEntityIds(knowledgeBaseId, entities);
 
+  // Batch-insert entity↔chunk links (1 round-trip, ON CONFLICT dedupes).
+  const seenPairs = new Set<string>();
+  const pairs: string[] = [];
   for (const entity of entities) {
-    const entityId = await resolveEntityId(knowledgeBaseId, entity);
+    const entityId = idMap.get(normalizeName(entity.name).toLowerCase());
     if (!entityId) continue;
-
-    entityIds.set(normalizeName(entity.name).toLowerCase(), entityId);
-    await prisma.kg_entity_chunk.upsert({
-      where: {
-        entity_id_chunk_id: {
-          entity_id: entityId,
-          chunk_id: graphChunkId,
-        },
-      },
-      update: {},
-      create: {
-        entity_id: entityId,
-        chunk_id: graphChunkId,
-      },
-    });
+    const key = `${entityId}|${graphChunkId}`;
+    if (seenPairs.has(key)) continue;
+    seenPairs.add(key);
+    pairs.push(entityId);
+  }
+  if (pairs.length > 0) {
+    const vals = pairs
+      .map((_, i) => `($${i * 2 + 1}::uuid, $${i * 2 + 2}::uuid)`)
+      .join(", ");
+    const params = pairs.flatMap((id) => [id, graphChunkId]);
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO kg_entity_chunk (entity_id, chunk_id)
+       VALUES ${vals}
+       ON CONFLICT (entity_id, chunk_id) DO NOTHING`,
+      ...params
+    );
   }
 
-  for (const relation of relations) {
-    const sourceId = entityIds.get(normalizeName(relation.source).toLowerCase());
-    const targetId = entityIds.get(normalizeName(relation.target).toLowerCase());
+  // Batch-insert relations: one dedup SELECT for this chunk + one multi-row INSERT.
+  const relSeen = new Set<string>();
+  const rels = relations
+    .map((r) => ({
+      source: idMap.get(normalizeName(r.source).toLowerCase()),
+      target: idMap.get(normalizeName(r.target).toLowerCase()),
+      type: normalizeRelationName(r.relation),
+    }))
+    .filter((r) => r.source && r.target && r.type) as {
+    source: string;
+    target: string;
+    type: string;
+  }[];
 
-    if (!sourceId || !targetId) continue;
+  // Dedupe within the chunk.
+  const uniqueRels = rels.filter((r) => {
+    const k = `${r.source}|${r.target}|${r.type}`;
+    if (relSeen.has(k)) return false;
+    relSeen.add(k);
+    return true;
+  });
 
-    const existingRelation = await prisma.$queryRawUnsafe<{ id: string }[]>(
-      `SELECT id
-       FROM kg_relation
-       WHERE knowledge_base_id = $1
-         AND source_entity_id = $2::uuid
-         AND target_entity_id = $3::uuid
-         AND relation_type = $4
-         AND metadata ->> 'chunk_id' = $5
-       LIMIT 1`,
+  if (uniqueRels.length === 0) return;
+
+  const existing = await prisma.$queryRawUnsafe<
+    { s: string; t: string; rt: string }[]
+  >(
+    `SELECT source_entity_id AS s, target_entity_id AS t, relation_type AS rt
+     FROM kg_relation
+     WHERE knowledge_base_id = $1 AND metadata ->> 'chunk_id' = $2`,
+    knowledgeBaseId,
+    graphChunkId
+  );
+  const existSet = new Set(existing.map((e) => `${e.s}|${e.t}|${e.rt}`));
+  const toInsert = uniqueRels.filter(
+    (r) => !existSet.has(`${r.source}|${r.target}|${r.type}`)
+  );
+
+  if (toInsert.length > 0) {
+    const vals = toInsert
+      .map((_, i) => {
+        const b = i * 5;
+        return `($${b + 1}, $${b + 2}::uuid, $${b + 3}::uuid, $${b + 4}, $${b + 5}::jsonb)`;
+      })
+      .join(", ");
+    const params = toInsert.flatMap((r) => [
       knowledgeBaseId,
-      sourceId,
-      targetId,
-      relation.relation,
-      graphChunkId
+      r.source,
+      r.target,
+      r.type,
+      JSON.stringify({ chunk_id: graphChunkId }),
+    ]);
+    await prisma.$executeRawUnsafe(
+      `INSERT INTO kg_relation (knowledge_base_id, source_entity_id, target_entity_id, relation_type, metadata)
+       VALUES ${vals}`,
+      ...params
     );
-
-    if (existingRelation[0]?.id) continue;
-
-    await prisma.kg_relation.create({
-      data: {
-        knowledge_base_id: knowledgeBaseId,
-        source_entity_id: sourceId,
-        target_entity_id: targetId,
-        relation_type: relation.relation,
-        description: relation.description ?? null,
-        metadata: {
-          chunk_id: graphChunkId,
-        },
-      },
-    });
   }
 }
 

@@ -2,7 +2,6 @@ import {
   JINA_API_KEY,
   JINA_RERANKER_URL,
   RERANKER_MODEL,
-  RERANKER_URL,
 } from "./config";
 
 export interface RerankResult {
@@ -11,12 +10,15 @@ export interface RerankResult {
 }
 
 /**
- * Rerank documents using Jina AI (cloud) or a local Infinity service as
- * fallback when JINA_API_KEY is not configured.
+ * Rerank documents using the Jina AI cloud reranker.
  *
- * Both endpoints expose the same Jina-compatible /rerank API:
+ * Jina-compatible /rerank API:
  *   POST { query, documents, top_n, model }
  *   → { results: [{ index, relevance_score }] }
+ *
+ * On any failure (network, non-2xx) we degrade to the original retrieval
+ * order so retrieval never breaks — reranking is a precision enhancement,
+ * not a hard dependency.
  */
 export async function rerank(
   query: string,
@@ -25,15 +27,12 @@ export async function rerank(
 ): Promise<RerankResult[]> {
   if (documents.length === 0) return [];
 
-  const useCloud = Boolean(JINA_API_KEY);
-  const url = useCloud ? JINA_RERANKER_URL : `${RERANKER_URL}/rerank`;
-
   try {
-    const res = await fetch(url, {
+    const res = await fetch(JINA_RERANKER_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        ...(useCloud ? { Authorization: `Bearer ${JINA_API_KEY}` } : {}),
+        Authorization: `Bearer ${JINA_API_KEY}`,
       },
       body: JSON.stringify({
         query,
@@ -50,7 +49,6 @@ export async function rerank(
     }
 
     const data = await res.json();
-    // Jina-compatible format: { results: [{ index, relevance_score }, ...] }
     const results: RerankResult[] = (data.results ?? data)
       .map((r: { index: number; relevance_score: number; score?: number }) => ({
         index: r.index,

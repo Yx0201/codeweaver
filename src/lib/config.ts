@@ -49,33 +49,13 @@ export const EMBEDDING_DIMENSIONS = readPositiveIntEnv("EMBEDDING_DIMENSIONS", 1
 export const QUERY_REWRITE_MODEL =
   process.env.QUERY_REWRITE_MODEL ?? "deepseek/deepseek-v4-flash";
 
-// --- Reranker (Jina AI cloud — Jina-compatible /rerank API) ---
+// --- Reranker (Jina AI cloud) ---
 export const JINA_API_KEY = process.env.JINA_API_KEY ?? "";
-/** Jina reranker endpoint (cloud). Falls back to a local Infinity service
- *  via RERANKER_URL if JINA_API_KEY is not set. */
 export const JINA_RERANKER_URL = "https://api.jina.ai/v1/rerank";
 export const RERANKER_MODEL =
   process.env.RERANKER_MODEL ?? "jina-reranker-v2-base-multilingual";
-/** Legacy local reranker URL — only used when JINA_API_KEY is absent. */
-export const RERANKER_URL =
-  process.env.RERANKER_URL ?? "http://127.0.0.1:8081";
 
-// --- Ollama (local — only used by graph extractor fallback when no cloud key) ---
-/** Base Ollama URL without trailing slash or /api suffix */
-export const OLLAMA_BASE_URL =
-  process.env.OLLAMA_BASE_URL ?? "http://localhost:11434";
-/** Ollama API URL (appends /api). Used by graph extractor local fallback. */
-export const OLLAMA_API_URL = `${OLLAMA_BASE_URL}/api`;
-export const GRAPH_EXTRACT_MODEL =
-  process.env.GRAPH_EXTRACT_MODEL ?? "qwen3.5:4b";
-
-// --- Graph extraction provider (cloud OpenAI-compatible endpoint) ---
-/**
- * When an API key is available, graph entity/relation extraction uses a cloud
- * OpenAI-compatible endpoint (much faster than local small models and allows
- * real concurrency). Falls back to local Ollama when no key is configured or
- * GRAPH_EXTRACT_USE_CLOUD=false.
- */
+// --- Graph extraction provider (Zenmux cloud, OpenAI-compatible) ---
 export const GRAPH_EXTRACT_API_BASE_URL =
   process.env.GRAPH_EXTRACT_API_BASE_URL ?? ZENMUX_BASE_URL;
 export const GRAPH_EXTRACT_API_KEY =
@@ -84,15 +64,12 @@ export const GRAPH_EXTRACT_CLOUD_MODEL =
   process.env.GRAPH_EXTRACT_CLOUD_MODEL ??
   process.env.RAGAS_EVAL_MODEL ??
   "deepseek/deepseek-v4-flash";
-export const GRAPH_EXTRACT_USE_CLOUD =
-  (process.env.GRAPH_EXTRACT_USE_CLOUD ??
-    (GRAPH_EXTRACT_API_KEY ? "true" : "false")) === "true";
 
 // --- Concurrency ---
 /** Initial graph-build concurrency (adaptive: AIMD adjusts per batch). */
 export const GRAPH_BUILD_CONCURRENCY = readPositiveIntEnv(
   "GRAPH_BUILD_CONCURRENCY",
-  GRAPH_EXTRACT_USE_CLOUD ? 8 : 2
+  8
 );
 export const GRAPH_BUILD_MIN_CONCURRENCY = readPositiveIntEnv(
   "GRAPH_BUILD_MIN_CONCURRENCY",
@@ -100,7 +77,7 @@ export const GRAPH_BUILD_MIN_CONCURRENCY = readPositiveIntEnv(
 );
 export const GRAPH_BUILD_MAX_CONCURRENCY = readPositiveIntEnv(
   "GRAPH_BUILD_MAX_CONCURRENCY",
-  GRAPH_EXTRACT_USE_CLOUD ? 24 : 4
+  24
 );
 
 /** Batch size for embedding generation during ingestion. */

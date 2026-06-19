@@ -329,13 +329,31 @@ async function runGraphBuildStage(
   );
   const startedAt = stats.startedAt ?? new Date().toISOString();
 
+  // Atomically CLAIM a batch of unprocessed chunks: stamp `processing_at`
+  // and return them in one statement. `FOR UPDATE SKIP LOCKED` ensures
+  // concurrent process requests (e.g. front-end polling) each take a
+  // disjoint set — without this, N concurrent requests would all SELECT the
+  // same unprocessed rows and the LLM would extract each chunk N times.
+  // A `processing_at` older than 10 min is treated as a dead claim (the
+  // request that took it crashed before marking graph_processed) and becomes
+  // re-claimable.
   const rows = await prisma.$queryRawUnsafe<{ id: string; chunk_text: string }[]>(
-    `SELECT id, chunk_text
-     FROM graph_chunks
-     WHERE file_id = $1::uuid
-       AND COALESCE(metadata ->> 'graph_processed', 'false') <> 'true'
-     ORDER BY chunk_order ASC
-     LIMIT $2`,
+    `UPDATE graph_chunks
+     SET metadata = COALESCE(metadata, '{}'::jsonb)
+       || jsonb_build_object('processing_at', NOW())
+     WHERE id IN (
+       SELECT id FROM graph_chunks
+       WHERE file_id = $1::uuid
+         AND COALESCE(metadata ->> 'graph_processed', 'false') <> 'true'
+         AND (
+           metadata ->> 'processing_at' IS NULL
+           OR (metadata ->> 'processing_at')::timestamp < NOW() - INTERVAL '10 minutes'
+         )
+       ORDER BY chunk_order ASC
+       LIMIT $2
+       FOR UPDATE SKIP LOCKED
+     )
+     RETURNING id, chunk_text`,
     fileId,
     concurrency
   );
@@ -397,11 +415,11 @@ async function runGraphBuildStage(
 
     await prisma.$executeRawUnsafe(
       `UPDATE graph_chunks
-       SET metadata = COALESCE(metadata, '{}'::jsonb)
-         || jsonb_build_object(
-              'graph_processed', true,
-              'graph_error', $2::text
-            )
+       SET metadata = (COALESCE(metadata, '{}'::jsonb)
+           || jsonb_build_object(
+                'graph_processed', true,
+                'graph_error', $2::text
+              )) - 'processing_at'
        WHERE id = $1::uuid`,
       row.id,
       graphError
