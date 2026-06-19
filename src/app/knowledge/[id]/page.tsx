@@ -39,6 +39,19 @@ export default async function KnowledgeBasePage({ params }: PageProps) {
     prisma.uploaded_files.findMany({
       where: { knowledge_base_id: knowledgeBaseId },
       orderBy: { upload_time: "desc" },
+      // Select only the columns the list needs — never read file_data (bytea)
+      // or content here. The Neon serverless driver parses bytea via
+      // `new Buffer()`, which trips Node's DEP0005 deprecation and would also
+      // drag the raw binary of every file across the wire for a list view.
+      select: {
+        id: true,
+        filename: true,
+        file_size: true,
+        upload_time: true,
+        status: true,
+        mime_type: true,
+        metadata: true,
+      },
     }),
     getKnowledgeGraphData(knowledgeBaseId),
   ]);

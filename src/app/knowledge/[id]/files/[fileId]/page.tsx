@@ -35,7 +35,10 @@ export default async function FilePreviewPage({ params }: PageProps) {
       upload_time: true,
       status: true,
       content: true,
-      file_data: true,
+      // Intentionally NOT selecting file_data: the preview uses `content`
+      // (text) only. Reading the bytea column would trigger the Neon
+      // driver's `new Buffer()` parse (Node DEP0005) for no benefit here.
+      // Binary download is served by /api/files/[fileId] instead.
     },
   });
 
@@ -45,7 +48,7 @@ export default async function FilePreviewPage({ params }: PageProps) {
   const isText = mimeType.startsWith("text/") || mimeType === "application/json";
   const isPdf = mimeType === "application/pdf";
   const isImage = mimeType.startsWith("image/");
-  const hasData = !!file.file_data;
+  const hasData = true; // binary is available via /api/files/[fileId] on demand
   const previewContent = normalizePreviewText(file.content);
 
   return (

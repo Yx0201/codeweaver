@@ -119,7 +119,7 @@ export function ChatShell({
   };
 
   return (
-    <div className="flex h-full overflow-hidden">
+    <div className="flex h-full flex-col overflow-hidden">
       <ConversationSidebar
         conversations={conversations}
         currentConversationId={currentConversationId}
@@ -129,7 +129,7 @@ export function ChatShell({
         onTitleUpdate={handleTitleUpdate}
         onDelete={handleDelete}
       />
-      <div className="flex-1 min-w-0 border-l">
+      <div className="min-h-0 flex-1">
         <ChatInterface
           key={chatKey}
           conversationId={currentConversationId}
