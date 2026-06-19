@@ -136,6 +136,9 @@ model uploaded_files {
   upload_time       DateTime?         @default(now()) @db.Timestamp(6)
   status            String?           @default("uploaded") @db.VarChar(50)
   metadata          Json?
+  // 上传原文(二进制)所在的 Vercel Blob URL。检索/分块所需的文本仍由
+  // `content` 提供;file_data 仅供存量数据迁移过渡使用,迁移完成后移除。
+  blob_url          String?           @db.VarChar(1000)
   content           String?
   file_data         Bytes?
   mime_type         String?           @db.VarChar(255)

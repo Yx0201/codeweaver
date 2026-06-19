@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
+import { uploadKnowledgeFile } from "@/lib/blob";
 import { buildUploadMetadata, createInitialUploadState } from "@/lib/upload-processing";
 
 interface RouteParams {
@@ -37,6 +38,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "文件内容为空" }, { status: 400 });
   }
 
+  const contentType = file.type || "application/octet-stream";
+
+  // 原文上传到 Vercel Blob,Neon 只存 URL。
+  const blob = await uploadKnowledgeFile(knowledgeBaseId, file.name, fileData, contentType);
+
   const processState = createInitialUploadState();
 
   const fileRecord = await prisma.uploaded_files.create({
@@ -44,8 +50,8 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       knowledge_base_id: knowledgeBaseId,
       filename: file.name,
       file_size: BigInt(file.size),
-      mime_type: file.type || "application/octet-stream",
-      file_data: fileData,
+      mime_type: contentType,
+      blob_url: blob.url,
       content,
       status: "processing",
       metadata: buildUploadMetadata(processState) as unknown as Prisma.InputJsonValue,

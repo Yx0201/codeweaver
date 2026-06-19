@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { cleanupKnowledgeGraph } from "@/lib/knowledge-graph";
 import { prisma } from "@/lib/prisma";
+import { deleteBlob, deleteBlobs } from "@/lib/blob";
 
 export type CreateKnowledgeBaseState = {
   error?: string;
@@ -81,7 +82,14 @@ export async function deleteKnowledgeBaseAction(
   const id = parseInt(formData.get("id") as string);
   if (isNaN(id)) return { error: "无效的知识库 ID" };
   try {
+    // 先取出该 KB 下所有文件的 blob_url,删除 DB 记录后清理 Blob 对象,
+    // 避免留下孤儿对象占用存储。
+    const files = await prisma.uploaded_files.findMany({
+      where: { knowledge_base_id: id },
+      select: { blob_url: true },
+    });
     await prisma.knowledge_base.delete({ where: { id } });
+    await deleteBlobs(files.map((f) => f.blob_url));
     revalidatePath("/knowledge");
     return { success: true };
   } catch (err) {
@@ -98,7 +106,13 @@ export async function deleteFileAction(
   const knowledgeBaseId = parseInt(formData.get("knowledgeBaseId") as string);
   if (!id) return { error: "无效的文件 ID" };
   try {
+    // 删除 DB 记录前先取出 blob_url,删完 DB 再清理 Blob 对象。
+    const file = await prisma.uploaded_files.findUnique({
+      where: { id },
+      select: { blob_url: true },
+    });
     await prisma.uploaded_files.delete({ where: { id } });
+    await deleteBlob(file?.blob_url);
     await cleanupKnowledgeGraph(knowledgeBaseId);
     revalidatePath(`/knowledge/${knowledgeBaseId}`);
     return { success: true };
