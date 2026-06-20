@@ -17,13 +17,44 @@ interface CitationListProps {
   references: MessageReference[];
 }
 
+/** Channel → label + tint classes for the index badge and the dot. */
+const SOURCE_STYLE: Record<
+  MessageReference["source"],
+  { label: string; badge: string; dot: string }
+> = {
+  vector: {
+    label: "向量",
+    badge: "bg-sky-500/15 text-sky-600 ring-sky-500/30",
+    dot: "bg-sky-500",
+  },
+  keyword: {
+    label: "关键词",
+    badge: "bg-amber-500/15 text-amber-600 ring-amber-500/30",
+    dot: "bg-amber-500",
+  },
+  both: {
+    label: "融合",
+    badge: "bg-violet-500/15 text-violet-600 ring-violet-500/30",
+    dot: "bg-violet-500",
+  },
+  graph: {
+    label: "图谱",
+    badge: "bg-emerald-500/15 text-emerald-600 ring-emerald-500/30",
+    dot: "bg-emerald-500",
+  },
+};
+
 /**
  * Build the DOM id for a reference item. The same scheme is used by the
  * markdown renderer when transforming `[N]` into clickable anchors, so that
  * `<a href="#…">` lands exactly on the matching list row.
+ *
+ * The separator is `~` (not `-`) because message IDs are nanoids that may
+ * contain `-` themselves — a trailing `~N` lets the anchor renderer parse its
+ * own index unambiguously from `#cite-<messageId>~<index>`.
  */
 export function citationAnchorId(messageId: string, index: number): string {
-  return `cite-${messageId}-${index}`;
+  return `cite-${messageId}~${index}`;
 }
 
 /** Custom event name dispatched by a `[N]` anchor to jump to its source row. */
@@ -31,6 +62,32 @@ export const CITATION_JUMP_EVENT = "citation-jump";
 
 export interface CitationJumpDetail {
   id: string;
+}
+
+/**
+ * Bidirectional highlight channel: any side (a `[N]` chip or a reference row)
+ * broadcasts the index it wants to spotlight; the other side highlights its
+ * matching element. `index: null` clears the current highlight.
+ *
+ * Used by M5 sentence-level cross-reference linking.
+ */
+export const CITATION_ACTIVATE_EVENT = "citation-activate";
+
+export interface CitationActivateDetail {
+  messageId: string;
+  index: number | null;
+}
+
+/** Spotlight reference `index` for `messageId`, or clear with `null`. */
+export function activateCitation(
+  messageId: string,
+  index: number | null
+): void {
+  window.dispatchEvent(
+    new CustomEvent<CitationActivateDetail>(CITATION_ACTIVATE_EVENT, {
+      detail: { messageId, index },
+    })
+  );
 }
 
 /**
@@ -43,6 +100,10 @@ export function CitationList({ messageId, references }: CitationListProps) {
   // We track the most recently jumped-to index so we can keep a soft highlight
   // on the row a `[N]` anchor pointed at.
   const [highlighted, setHighlighted] = useState<number | null>(null);
+  // Index currently spotlighted via the bidirectional activate channel
+  // (hover a `[N]` chip OR hover a row). Drives the cross-highlight with the
+  // answer's `[N]` anchors.
+  const [activated, setActivated] = useState<number | null>(null);
   // The reference list is collapsible. It starts expanded (it only appears
   // once the answer has finished streaming), but the user can fold it away.
   const [expanded, setExpanded] = useState(false);
@@ -87,10 +148,22 @@ export function CitationList({ messageId, references }: CitationListProps) {
     return () => window.removeEventListener(CITATION_JUMP_EVENT, handler);
   }, [references, messageId]);
 
+  // M5 bidirectional link: when a `[N]` chip (or another row) is hovered/
+  // focused, it broadcasts its index; we highlight the matching row here.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<CitationActivateDetail>).detail;
+      if (!detail || detail.messageId !== messageId) return;
+      setActivated(detail.index);
+    };
+    window.addEventListener(CITATION_ACTIVATE_EVENT, handler);
+    return () => window.removeEventListener(CITATION_ACTIVATE_EVENT, handler);
+  }, [messageId]);
+
   return (
     <>
-      <div
-        className="mt-4 rounded-xl border border-border bg-card/40 px-3.5 py-3"
+      <section
+        className="py-2"
         aria-label="参考资料"
       >
         <button
@@ -110,9 +183,16 @@ export function CitationList({ messageId, references }: CitationListProps) {
           />
         </button>
         {expanded && (
-        <ol className="mt-2 space-y-1">
+        <ol className="mt-2.5 space-y-1">
           {references.map((ref) => {
-            const isActive = highlighted === ref.index;
+            const isActive = highlighted === ref.index || activated === ref.index;
+            const src = SOURCE_STYLE[ref.source] ?? SOURCE_STYLE.vector;
+            const scoreLabel =
+              ref.rerankScore != null
+                ? `重排 ${ref.rerankScore}`
+                : ref.fusionScore != null
+                  ? `融合 ${ref.fusionScore}`
+                  : null;
             return (
               <li key={ref.index} id={citationAnchorId(messageId, ref.index)}>
                 <button
@@ -121,6 +201,10 @@ export function CitationList({ messageId, references }: CitationListProps) {
                     setActive(ref);
                     setHighlighted(ref.index);
                   }}
+                  onMouseEnter={() => activateCitation(messageId, ref.index)}
+                  onMouseLeave={() => activateCitation(messageId, null)}
+                  onFocus={() => activateCitation(messageId, ref.index)}
+                  onBlur={() => activateCitation(messageId, null)}
                   className={cn(
                     "group flex w-full items-start gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors",
                     "hover:bg-accent/50",
@@ -134,7 +218,7 @@ export function CitationList({ messageId, references }: CitationListProps) {
                       "mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-md font-mono text-[10px] font-semibold tabular-nums ring-1 transition-colors",
                       isActive
                         ? "bg-primary/15 text-primary ring-primary/30"
-                        : "bg-muted text-muted-foreground ring-border group-hover:text-foreground"
+                        : src.badge
                     )}
                   >
                     {ref.index}
@@ -143,8 +227,19 @@ export function CitationList({ messageId, references }: CitationListProps) {
                     <span className="block truncate text-sm leading-snug text-foreground/90">
                       {ref.snippet}
                     </span>
-                    <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">
-                      {ref.filename}
+                    <span className="mt-0.5 flex items-center gap-1.5">
+                      <span className="flex items-center gap-1 rounded-sm px-1 py-px font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                        <span className={cn("size-1.5 rounded-full", src.dot)} />
+                        {src.label}
+                      </span>
+                      {scoreLabel && (
+                        <span className="font-mono text-[9px] tabular-nums text-muted-foreground/80">
+                          {scoreLabel}
+                        </span>
+                      )}
+                      <span className="truncate font-mono text-[10px] text-muted-foreground">
+                        {ref.filename}
+                      </span>
                     </span>
                   </span>
                 </button>
@@ -153,7 +248,7 @@ export function CitationList({ messageId, references }: CitationListProps) {
           })}
         </ol>
         )}
-      </div>
+      </section>
 
       <CitationPreviewDialog
         reference={active}
@@ -183,8 +278,32 @@ function CitationPreviewDialog({
                   <FileText className="size-4" strokeWidth={1.75} />
                 </span>
                 <span className="truncate">{reference.filename}</span>
-                <span className="ml-auto shrink-0 rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground ring-1 ring-border">
-                  [{reference.index}]
+                <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                  {(() => {
+                    const src = SOURCE_STYLE[reference.source] ?? SOURCE_STYLE.vector;
+                    const scoreLabel =
+                      reference.rerankScore != null
+                        ? `重排 ${reference.rerankScore}`
+                        : reference.fusionScore != null
+                          ? `融合 ${reference.fusionScore}`
+                          : null;
+                    return (
+                      <>
+                        <span className="flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground ring-1 ring-border">
+                          <span className={cn("size-1.5 rounded-full", src.dot)} />
+                          {src.label}
+                        </span>
+                        {scoreLabel && (
+                          <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground ring-1 ring-border">
+                            {scoreLabel}
+                          </span>
+                        )}
+                        <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground ring-1 ring-border">
+                          [{reference.index}]
+                        </span>
+                      </>
+                    );
+                  })()}
                 </span>
               </DialogTitle>
               <DialogDescription className="font-mono text-[10px] uppercase tracking-[0.16em]">

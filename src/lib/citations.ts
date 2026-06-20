@@ -1,3 +1,5 @@
+import type { TraceStep } from "./trace";
+
 /**
  * Shared shape for RAG citation references — written by the chat route,
  * persisted on `conversation_message.metadata`, and consumed by the chat UI
@@ -18,6 +20,10 @@ export interface MessageReference {
   snippet: string;
   /** Where this chunk came from in the retrieval pipeline. */
   source: "vector" | "keyword" | "both" | "graph";
+  /** RRF fusion score (higher = more channels / better ranks agreed). */
+  fusionScore?: number;
+  /** Cross-encoder rerank score (only set when reranking ran, 0–1). */
+  rerankScore?: number;
 }
 
 /**
@@ -27,6 +33,8 @@ export interface MessageReference {
  */
 export interface AssistantMessageMetadata {
   references?: MessageReference[];
+  /** Retrieval pipeline trace — one entry per pipeline step. */
+  trace?: TraceStep[];
 }
 
 /** Take the first ~N characters of `text`, stripping noisy whitespace. */
@@ -42,20 +50,43 @@ export function buildSnippet(text: string, max = 30): string {
  * Type guard: detect whether `metadata` from Prisma looks like an assistant
  * message payload with references. We can't rely on the Json column's
  * structural shape so anything unexpected falls back to `undefined`.
+ *
+ * The `trace` field is passed through if present and well-formed, even when
+ * there are no references (a retrieval run that returned 0 chunks still has
+ * a trace worth showing).
  */
 export function readAssistantMetadata(
   metadata: unknown
 ): AssistantMessageMetadata | undefined {
   if (!metadata || typeof metadata !== "object") return undefined;
-  const m = metadata as { references?: unknown };
-  if (!Array.isArray(m.references)) return undefined;
-  const references = m.references.filter(
-    (r): r is MessageReference =>
-      typeof r === "object" &&
-      r !== null &&
-      typeof (r as MessageReference).index === "number" &&
-      typeof (r as MessageReference).chunkId === "string" &&
-      typeof (r as MessageReference).chunkText === "string"
-  );
-  return references.length > 0 ? { references } : undefined;
+  const m = metadata as { references?: unknown; trace?: unknown };
+
+  const references = Array.isArray(m.references)
+    ? m.references.filter(
+        (r): r is MessageReference =>
+          typeof r === "object" &&
+          r !== null &&
+          typeof (r as MessageReference).index === "number" &&
+          typeof (r as MessageReference).chunkId === "string" &&
+          typeof (r as MessageReference).chunkText === "string"
+      )
+    : [];
+
+  const trace = Array.isArray(m.trace)
+    ? m.trace.filter(
+        (s): s is TraceStep =>
+          typeof s === "object" &&
+          s !== null &&
+          typeof (s as TraceStep).type === "string" &&
+          typeof (s as TraceStep).status === "string"
+      )
+    : undefined;
+
+  if (references.length > 0) {
+    return { references, ...(trace ? { trace } : {}) };
+  }
+  if (trace && trace.length > 0) {
+    return { trace };
+  }
+  return undefined;
 }

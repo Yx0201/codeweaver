@@ -1,5 +1,6 @@
 import { graphSearch } from "@/lib/graph-search";
 import { hybridSearch, type HybridSearchOptions, type HybridSearchResult } from "@/lib/hybrid-search";
+import { withTrace, type TraceCallback } from "@/lib/trace";
 import {
   DEFAULT_FINAL_TOP_K,
   DEFAULT_KEYWORD_TOP_K,
@@ -24,7 +25,8 @@ export async function searchKnowledgeBase(
   query: string,
   knowledgeBaseId: number,
   searchMode: RetrievalMode,
-  options: SearchKnowledgeBaseOptions = {}
+  options: SearchKnowledgeBaseOptions = {},
+  onTrace?: TraceCallback
 ): Promise<HybridSearchResult[]> {
   const {
     vectorTopK = DEFAULT_VECTOR_TOP_K,
@@ -37,17 +39,23 @@ export async function searchKnowledgeBase(
   } = options;
 
   if (searchMode === "graph") {
-    const results = await graphSearch(query, knowledgeBaseId, finalTopK);
-
-    return results.map((result) => ({
-      chunk_id: result.chunk_id,
-      file_id: result.file_id,
-      filename: result.filename,
-      chunk_text: result.chunk_text,
-      score: result.score,
-      source: "graph",
-      metadata: result.metadata,
-    }));
+    return withTrace(
+      "graph_only_search",
+      async () => {
+        const results = await graphSearch(query, knowledgeBaseId, finalTopK);
+        const mapped = results.map((result) => ({
+          chunk_id: result.chunk_id,
+          file_id: result.file_id,
+          filename: result.filename,
+          chunk_text: result.chunk_text,
+          score: result.score,
+          source: "graph" as const,
+          metadata: result.metadata,
+        }));
+        return { result: mapped, data: { query, topK: finalTopK, count: mapped.length } };
+      },
+      onTrace
+    );
   }
 
   const hybridOptions: HybridSearchOptions = {
@@ -66,6 +74,7 @@ export async function searchKnowledgeBase(
     vectorTopK,
     keywordTopK,
     finalTopK,
-    hybridOptions
+    hybridOptions,
+    onTrace
   );
 }

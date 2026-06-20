@@ -1,6 +1,7 @@
 import { generateText } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { ZENMUX_BASE_URL, ZENMUX_API_KEY, QUERY_REWRITE_MODEL } from "./config";
+import { emitTrace, type TraceCallback } from "./trace";
 
 const zenmux = createOpenAICompatible({
   name: "zenmux",
@@ -29,21 +30,52 @@ export interface RewrittenQuery {
  */
 export async function rewriteQuery(
   query: string,
-  mode: RewriteMode = "hyde"
+  mode: RewriteMode = "hyde",
+  onTrace?: TraceCallback
 ): Promise<RewrittenQuery> {
+  const start = Date.now();
   try {
+    let result: RewrittenQuery;
     switch (mode) {
       case "rewrite":
-        return await rewriteMode(query);
+        result = await rewriteMode(query);
+        break;
       case "hyde":
-        return await hydeMode(query);
+        result = await hydeMode(query);
+        break;
       case "expand":
-        return await expandMode(query);
+        result = await expandMode(query);
+        break;
       default:
-        return { original: query, rewritten: query };
+        result = { original: query, rewritten: query };
     }
+    emitTrace(
+      "query_rewrite",
+      "done",
+      Date.now() - start,
+      {
+        mode,
+        original: result.original,
+        rewritten: result.rewritten,
+        subQueries: result.subQueries,
+        hypotheticalAnswer: result.hypotheticalAnswer,
+      },
+      onTrace
+    );
+    return result;
   } catch (err) {
     console.error("Query rewriting failed, using original query:", err);
+    emitTrace(
+      "query_rewrite",
+      "error",
+      Date.now() - start,
+      {
+        mode,
+        original: query,
+        error: err instanceof Error ? err.message : String(err),
+      },
+      onTrace
+    );
     return { original: query, rewritten: query };
   }
 }

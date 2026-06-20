@@ -3,6 +3,7 @@ import {
   JINA_RERANKER_URL,
   RERANKER_MODEL,
 } from "./config";
+import { emitTrace, type TraceCallback } from "./trace";
 
 export interface RerankResult {
   index: number;
@@ -23,10 +24,21 @@ export interface RerankResult {
 export async function rerank(
   query: string,
   documents: string[],
-  topK: number = 8
+  topK: number = 8,
+  onTrace?: TraceCallback
 ): Promise<RerankResult[]> {
-  if (documents.length === 0) return [];
+  if (documents.length === 0) {
+    emitTrace(
+      "rerank",
+      "skipped",
+      0,
+      { inputCount: 0, outputCount: 0, degraded: false, reason: "empty-input" },
+      onTrace
+    );
+    return [];
+  }
 
+  const start = Date.now();
   try {
     const res = await fetch(JINA_RERANKER_URL, {
       method: "POST",
@@ -45,7 +57,21 @@ export async function rerank(
 
     if (!res.ok) {
       console.error(`Reranker returned ${res.status}, falling back to original order`);
-      return fallbackResults(documents, topK);
+      const fallback = fallbackResults(documents, topK);
+      emitTrace(
+        "rerank",
+        "done",
+        Date.now() - start,
+        {
+          inputCount: documents.length,
+          outputCount: fallback.length,
+          degraded: true,
+          reason: `http-${res.status}`,
+          scores: fallback,
+        },
+        onTrace
+      );
+      return fallback;
     }
 
     const data = await res.json();
@@ -57,10 +83,37 @@ export async function rerank(
       .sort((a: RerankResult, b: RerankResult) => b.relevance_score - a.relevance_score)
       .slice(0, topK);
 
+    emitTrace(
+      "rerank",
+      "done",
+      Date.now() - start,
+      {
+        inputCount: documents.length,
+        outputCount: results.length,
+        degraded: false,
+        scores: results,
+      },
+      onTrace
+    );
     return results;
   } catch (err) {
     console.error("Reranker call failed, falling back to original order:", err);
-    return fallbackResults(documents, topK);
+    const fallback = fallbackResults(documents, topK);
+    emitTrace(
+      "rerank",
+      "done",
+      Date.now() - start,
+      {
+        inputCount: documents.length,
+        outputCount: fallback.length,
+        degraded: true,
+        reason: "exception",
+        error: err instanceof Error ? err.message : String(err),
+        scores: fallback,
+      },
+      onTrace
+    );
+    return fallback;
   }
 }
 

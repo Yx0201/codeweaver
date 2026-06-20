@@ -4,6 +4,8 @@ import { graphSearch } from "@/lib/graph-search";
 import { rerank } from "@/lib/reranker";
 import { rewriteQuery, type RewriteMode } from "@/lib/query-rewriter";
 import { prisma } from "@/lib/prisma";
+import { nanoid } from "nanoid";
+import { withTrace, emitTrace, type TraceCallback, type TraceStep } from "@/lib/trace";
 import {
   RRF_K,
   DEFAULT_VECTOR_TOP_K,
@@ -125,7 +127,8 @@ async function fuseAndFinalize(
   options: Pick<
     HybridSearchOptions,
     "useReranker" | "fusionTopK" | "rerankerTopK"
-  >
+  >,
+  onTrace?: TraceCallback
 ): Promise<HybridSearchResult[]> {
   const {
     useReranker = false,
@@ -133,7 +136,23 @@ async function fuseAndFinalize(
     rerankerTopK = DEFAULT_RERANKER_TOP_K,
   } = options;
 
-  const fused = reciprocalRankFusion(resultLists);
+  const channelCounts = resultLists.map((l) => ({ label: l.label, count: l.results.length }));
+
+  const fused = await withTrace(
+    "rrf_fusion",
+    async () => {
+      const map = reciprocalRankFusion(resultLists);
+      return {
+        result: map,
+        data: {
+          channels: channelCounts,
+          fusedCount: map.size,
+          k: RRF_K,
+        },
+      };
+    },
+    onTrace
+  );
 
   const fusedResults: HybridSearchResult[] = [...fused.values()]
     .sort((a, b) => b.score - a.score)
@@ -143,7 +162,7 @@ async function fuseAndFinalize(
   let finalResults: HybridSearchResult[];
   if (useReranker && fusedResults.length > 0) {
     const documents = fusedResults.map((r) => r.chunk_text);
-    const rerankResults = await rerank(query, documents, rerankerTopK);
+    const rerankResults = await rerank(query, documents, rerankerTopK, onTrace);
 
     const reranked = rerankResults.map((rr) => ({
       ...fusedResults[rr.index],
@@ -163,7 +182,20 @@ async function fuseAndFinalize(
     finalResults = fusedResults.slice(0, finalTopK);
   }
 
-  return resolveParentChunks(finalResults);
+  return withTrace(
+    "resolve_parents",
+    async () => {
+      const resolved = await resolveParentChunks(finalResults);
+      return {
+        result: resolved,
+        data: {
+          inputCount: finalResults.length,
+          outputCount: resolved.length,
+        },
+      };
+    },
+    onTrace
+  );
 }
 
 /**
@@ -179,7 +211,8 @@ export async function hybridSearch(
   vectorTopK: number = DEFAULT_VECTOR_TOP_K,
   keywordTopK: number = DEFAULT_KEYWORD_TOP_K,
   finalTopK: number = DEFAULT_FINAL_TOP_K,
-  options: HybridSearchOptions = {}
+  options: HybridSearchOptions = {},
+  onTrace?: TraceCallback
 ): Promise<HybridSearchResult[]> {
   const {
     useGraph = false,
@@ -192,7 +225,7 @@ export async function hybridSearch(
   let keywordQuery = query;
 
   if (queryRewriteMode) {
-    const rewritten = await rewriteQuery(query, queryRewriteMode);
+    const rewritten = await rewriteQuery(query, queryRewriteMode, onTrace);
 
     if (queryRewriteMode === "hyde" && rewritten.hypotheticalAnswer) {
       // HyDE: use hypothetical answer embedding for vector search,
@@ -204,20 +237,64 @@ export async function hybridSearch(
       keywordQuery = rewritten.rewritten;
     } else if (queryRewriteMode === "expand" && rewritten.subQueries) {
       // Expand: run searches for each sub-query and merge
-      return expandSearch(query, rewritten.subQueries, knowledgeBaseId, vectorTopK, keywordTopK, finalTopK, options);
+      return expandSearch(query, rewritten.subQueries, knowledgeBaseId, vectorTopK, keywordTopK, finalTopK, options, onTrace);
     }
   }
 
   // Run all retrieval channels in parallel. Graph search may fail
   // independently (e.g. no graph built yet) without breaking the pipeline.
   const [vectorResults, keywordResults, graphResults] = await Promise.all([
-    vectorSearch(vectorQuery, knowledgeBaseId, vectorTopK),
-    keywordSearch(keywordQuery, knowledgeBaseId, keywordTopK),
+    withTrace(
+      "vector_search",
+      async () => {
+        const result = await vectorSearch(vectorQuery, knowledgeBaseId, vectorTopK);
+        return {
+          result,
+          data: { query: vectorQuery, topK: vectorTopK, count: result.length },
+        };
+      },
+      onTrace
+    ),
+    withTrace(
+      "keyword_search",
+      async () => {
+        const result = await keywordSearch(keywordQuery, knowledgeBaseId, keywordTopK);
+        return {
+          result,
+          data: { query: keywordQuery, topK: keywordTopK, count: result.length },
+        };
+      },
+      onTrace
+    ),
     useGraph
-      ? graphSearch(query, knowledgeBaseId, graphTopK).catch((err) => {
-          console.error("Graph channel failed, continuing without it:", err);
-          return [];
-        })
+      ? (async () => {
+          const start = Date.now();
+          try {
+            const graph = await graphSearch(query, knowledgeBaseId, graphTopK);
+            emitTrace(
+              "graph_search",
+              "done",
+              Date.now() - start,
+              { query, topK: graphTopK, count: graph.length },
+              onTrace
+            );
+            return graph;
+          } catch (err) {
+            console.error("Graph channel failed, continuing without it:", err);
+            emitTrace(
+              "graph_search",
+              "error",
+              Date.now() - start,
+              {
+                query,
+                topK: graphTopK,
+                error: err instanceof Error ? err.message : String(err),
+              },
+              onTrace
+            );
+            return [];
+          }
+        })()
       : Promise.resolve([]),
   ]);
 
@@ -230,7 +307,7 @@ export async function hybridSearch(
     resultLists.push({ results: graphResults, label: "graph" });
   }
 
-  return fuseAndFinalize(query, resultLists, finalTopK, options);
+  return fuseAndFinalize(query, resultLists, finalTopK, options, onTrace);
 }
 
 /**
@@ -244,17 +321,36 @@ async function expandSearch(
   vectorTopK: number,
   keywordTopK: number,
   finalTopK: number,
-  options: HybridSearchOptions
+  options: HybridSearchOptions,
+  onTrace?: TraceCallback
 ): Promise<HybridSearchResult[]> {
   // Always include the original query — sub-queries complement it,
   // they should not replace it.
   const queries = [originalQuery, ...subQueries.filter((q) => q !== originalQuery)];
 
+  const expandStart = Date.now();
+  const childSteps: TraceStep[] = [];
+  const childTrace: TraceCallback = (step) => childSteps.push(step);
+
   const allResults = await Promise.all(
     queries.map(async (q) => {
       const [vec, kw] = await Promise.all([
-        vectorSearch(q, knowledgeBaseId, vectorTopK),
-        keywordSearch(q, knowledgeBaseId, keywordTopK),
+        withTrace(
+          "vector_search",
+          async () => {
+            const result = await vectorSearch(q, knowledgeBaseId, vectorTopK);
+            return { result, data: { query: q, topK: vectorTopK, count: result.length } };
+          },
+          childTrace
+        ),
+        withTrace(
+          "keyword_search",
+          async () => {
+            const result = await keywordSearch(q, knowledgeBaseId, keywordTopK);
+            return { result, data: { query: q, topK: keywordTopK, count: result.length } };
+          },
+          childTrace
+        ),
       ]);
       return { vec, kw };
     })
@@ -268,17 +364,56 @@ async function expandSearch(
   }
 
   if (options.useGraph) {
-    const graphResults = await graphSearch(
-      originalQuery,
-      knowledgeBaseId,
-      options.graphTopK ?? DEFAULT_GRAPH_CHANNEL_TOP_K
-    ).catch(() => []);
-    if (graphResults.length > 0) {
-      resultLists.push({ results: graphResults, label: "graph" });
+    const graphStart = Date.now();
+    try {
+      const graphResults = await graphSearch(
+        originalQuery,
+        knowledgeBaseId,
+        options.graphTopK ?? DEFAULT_GRAPH_CHANNEL_TOP_K
+      );
+      emitTrace(
+        "graph_search",
+        "done",
+        Date.now() - graphStart,
+        { query: originalQuery, count: graphResults.length },
+        childTrace
+      );
+      if (graphResults.length > 0) {
+        resultLists.push({ results: graphResults, label: "graph" });
+      }
+    } catch (err) {
+      console.error("Graph channel failed in expand search:", err);
+      emitTrace(
+        "graph_search",
+        "error",
+        Date.now() - graphStart,
+        {
+          query: originalQuery,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        childTrace
+      );
     }
   }
 
-  return fuseAndFinalize(originalQuery, resultLists, finalTopK, options);
+  const finalized = await fuseAndFinalize(originalQuery, resultLists, finalTopK, options, childTrace);
+
+  if (onTrace) {
+    onTrace({
+      id: nanoid(8),
+      type: "expand_search",
+      status: "done",
+      durationMs: Date.now() - expandStart,
+      data: {
+        originalQuery,
+        subQueries,
+        queryCount: queries.length,
+      },
+      children: childSteps,
+    });
+  }
+
+  return finalized;
 }
 
 /**

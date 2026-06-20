@@ -31,8 +31,14 @@ import {
   SelectTrigger,
 } from "@/components/ui/select";
 import { createConversation, type SearchMode } from "@/actions/conversation";
-import type { AssistantMessageMetadata } from "@/lib/citations";
+import type {
+  AssistantMessageMetadata,
+  MessageReference,
+} from "@/lib/citations";
+import type { TraceStep } from "@/lib/trace";
+import type { ChatDataParts } from "@/lib/chat-stream";
 import { CitationList } from "./citation-list";
+import { ThinkingChain } from "./thinking-chain";
 import {
   CitationAnchor,
   preprocessCitations,
@@ -41,6 +47,18 @@ import {
 // Streamdown component overrides for assistant messages. Defined at module
 // scope so the object identity is stable across renders.
 const assistantStreamdownComponents = { a: CitationAnchor };
+
+// The three-dot "thinking" indicator, shared by the standalone pre-stream
+// bubble and the in-container waiting-for-answer state.
+function LoadingDots() {
+  return (
+    <div className="flex items-center gap-1 py-1 px-1">
+      <span className="w-2 h-2 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:0ms]" />
+      <span className="w-2 h-2 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:150ms]" />
+      <span className="w-2 h-2 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:300ms]" />
+    </div>
+  );
+}
 
 interface KnowledgeBase {
   id: number;
@@ -247,140 +265,199 @@ export function ChatInterface({
     });
   };
 
-  // Keep the "thinking" indicator visible from submit until the assistant's
-  // first token actually arrives. The server runs the full RAG pipeline
-  // (retrieval + rerank + system-prompt assembly) before the LLM emits any
-  // text, and the AI SDK flips status to "streaming" the instant the stream's
-  // `start` part lands — which is BEFORE the first token. Gating only on
-  // `status === "submitted"` therefore hides the loader during the (often long)
-  // retrieval→generation gap. So we also keep it while streaming has begun but
-  // the assistant message still has no text content.
-  const lastMessage = messages[messages.length - 1];
-  const lastAssistantText =
-    lastMessage?.role === "assistant"
-      ? lastMessage.parts
-          .filter(
-            (p): p is { type: "text"; text: string } => p.type === "text"
-          )
-          .map((p) => p.text)
-          .join("")
-      : "";
-  const isAssistantPending =
-    (status === "submitted" || status === "streaming") &&
-    lastAssistantText.trim().length === 0;
-
   // True while the model is actively producing a response — used to flip the
   // submit button into a stop control and to relax the empty-input disable.
   const isGenerating = status === "submitted" || status === "streaming";
+
+  const lastMessage = messages[messages.length - 1];
+  const lastMessageIsAssistant = lastMessage?.role === "assistant";
 
   // The optimistic bubble is shown only in the pre-send window (status "ready",
   // i.e. before sendMessage has run). Once status flips, useChat renders the real
   // bubble and the effect above clears `optimisticUserText`.
   const showOptimisticBubble =
     optimisticUserText !== null && status === "ready";
-  // Keep the AI-thinking dots up across the whole wait: the optimistic window
-  // (createConversation await) AND the useChat submitted/streaming window.
-  const showAssistantPending = optimisticUserText !== null || isAssistantPending;
+  // The standalone "thinking" bubble exists ONLY to fill the gap before a real
+  // assistant message exists to host the loader: the optimistic pre-send window
+  // (createConversation await) and the submitted-but-no-assistant-message-yet
+  // window (server running the RAG pipeline before the stream's first part).
+  // The moment the assistant message appears, the loader moves INSIDE that
+  // message's unified container (see the text section below) — so we never show
+  // a second bubble alongside the streaming answer.
+  const showStandalonePending =
+    optimisticUserText !== null || (isGenerating && !lastMessageIsAssistant);
 
   return (
     <div className="w-full mx-auto p-6 relative h-full">
       <div className="flex flex-col h-full">
         <Conversation className="min-h-0">
           <ConversationContent>
-            {messages.map((message, messageIndex) => (
-              <Fragment key={message.id}>
-                {message.parts.map((part, i) => {
-                  switch (part.type) {
-                    case "text": {
-                      const isLastMessage =
-                        messageIndex === messages.length - 1;
-                      const isAssistant = message.role === "assistant";
-                      // While the answer is still streaming we hold the
-                      // citation list back, so the body text renders first and
-                      // the references only appear once the answer is complete.
-                      const isStreamingThisMessage =
-                        isLastMessage &&
-                        (status === "submitted" || status === "streaming");
-                      // `metadata` is set either by initialMessages on first
-                      // load or by the server's messageMetadata stream chunk.
-                      const messageMetadata = (
-                        message as { metadata?: AssistantMessageMetadata }
-                      ).metadata;
-                      const references =
-                        isAssistant && messageMetadata?.references
-                          ? messageMetadata.references
-                          : [];
-                      const renderText =
-                        references.length > 0
-                          ? preprocessCitations(
-                              part.text,
-                              references.length,
-                              message.id
-                            )
-                          : part.text;
-                      return (
-                        <Fragment key={`${message.id}-${i}`}>
-                          <Message from={message.role}>
-                            <div
-                              className={`w-full flex ${message.role === "user" ? "flex-row-reverse" : ""}`}
-                            >
-                              {message.role === "user" ? (
-                                <div className="flex size-8 items-center justify-center rounded-xl bg-secondary text-secondary-foreground ring-1 ring-border">
-                                  <User className="size-4" strokeWidth={1.75} />
+            {messages.map((message, messageIndex) => {
+              const isLastMessage = messageIndex === messages.length - 1;
+              const isAssistant = message.role === "assistant";
+              // While the answer is still streaming we hold the citation list
+              // back, so the body text renders first and the references only
+              // appear once the answer is complete.
+              const isStreamingThisMessage =
+                isLastMessage &&
+                (status === "submitted" || status === "streaming");
+              // `metadata` persists across reload (initialMessages); the live
+              // thinking chain comes from `data-*` parts during the session.
+              const messageMetadata = (
+                message as { metadata?: AssistantMessageMetadata }
+              ).metadata;
+              // Live data parts (this session) take precedence; on a reload they
+              // are gone, so we fall back to the persisted metadata.
+              const parts = message.parts as Array<{
+                type: string;
+                data?: unknown;
+              }>;
+              const planPart = isAssistant
+                ? (parts.find((p) => p.type === "data-plan")?.data as
+                    | ChatDataParts["plan"]
+                    | undefined)
+                : undefined;
+              const liveTrace = isAssistant
+                ? parts
+                    .filter((p) => p.type === "data-trace")
+                    .map((p) => p.data as TraceStep)
+                : [];
+              const liveCitations = isAssistant
+                ? (parts.find((p) => p.type === "data-citations")?.data as
+                    | MessageReference[]
+                    | undefined)
+                : undefined;
+              const readySignal = isAssistant
+                ? parts.some((p) => p.type === "data-ready")
+                : false;
+
+              const references =
+                liveCitations ??
+                (isAssistant ? messageMetadata?.references ?? [] : []);
+              const trace =
+                liveTrace.length > 0
+                  ? liveTrace
+                  : isAssistant
+                    ? messageMetadata?.trace ?? []
+                    : [];
+              // Gather reasoning + text up front so the answer renders as a
+              // single unified block in the order thinking → text → citations,
+              // instead of one bubble per part.
+              const reasoningText = isAssistant
+                ? message.parts
+                    .filter(
+                      (p): p is { type: "reasoning"; text: string } =>
+                        p.type === "reasoning"
+                    )
+                    .map((p) => p.text)
+                    .join("")
+                : "";
+              const textContent = message.parts
+                .filter(
+                  (p): p is { type: "text"; text: string } => p.type === "text"
+                )
+                .map((p) => p.text)
+                .join("\n\n");
+              const renderText =
+                references.length > 0
+                  ? preprocessCitations(
+                      textContent,
+                      references.length,
+                      message.id
+                    )
+                  : textContent;
+
+              return (
+                <Fragment key={message.id}>
+                  <Message from={message.role}>
+                    <div
+                      className={`w-full flex ${message.role === "user" ? "flex-row-reverse" : ""}`}
+                    >
+                      {message.role === "user" ? (
+                        <div className="flex size-8 items-center justify-center rounded-xl bg-secondary text-secondary-foreground ring-1 ring-border">
+                          <User className="size-4" strokeWidth={1.75} />
+                        </div>
+                      ) : (
+                        <div className="flex size-8 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
+                          <Bot className="size-4" strokeWidth={1.75} />
+                        </div>
+                      )}
+                    </div>
+                    <MessageContent>
+                      {isAssistant ? (
+                        // Flat, borderless reply: a live thinking chain, then
+                        // the answer, then citations — no card wrapper, so the
+                        // loading state never looks boxed-in.
+                        (() => {
+                          const hasThinking =
+                            !!planPart?.intro ||
+                            trace.length > 0 ||
+                            reasoningText.length > 0;
+                          const hasAnswer = textContent.trim().length > 0;
+                          return (
+                            <div className="w-full">
+                              {hasThinking && (
+                                <ThinkingChain
+                                  intro={planPart?.intro}
+                                  mode={planPart?.mode}
+                                  steps={trace}
+                                  reasoningText={reasoningText}
+                                  streaming={isStreamingThisMessage}
+                                  ready={readySignal}
+                                />
+                              )}
+                              {hasAnswer ? (
+                                <div className="pt-1">
+                                  <MessageResponse
+                                    components={assistantStreamdownComponents}
+                                  >
+                                    {renderText}
+                                  </MessageResponse>
                                 </div>
                               ) : (
-                                <div className="flex size-8 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
-                                  <Bot className="size-4" strokeWidth={1.75} />
-                                </div>
+                                // Assistant message exists but nothing has
+                                // arrived yet — one unified bare loader.
+                                isStreamingThisMessage &&
+                                !hasThinking && <LoadingDots />
                               )}
-                            </div>
-                            <MessageContent>
-                              <MessageResponse
-                                components={
-                                  isAssistant
-                                    ? assistantStreamdownComponents
-                                    : undefined
-                                }
-                              >
-                                {renderText}
-                              </MessageResponse>
-                              {isAssistant &&
-                                references.length > 0 &&
+                              {references.length > 0 &&
                                 !isStreamingThisMessage && (
-                                  <CitationList
-                                    messageId={message.id}
-                                    references={references}
-                                  />
+                                  <div className="pt-2">
+                                    <CitationList
+                                      messageId={message.id}
+                                      references={references}
+                                    />
+                                  </div>
                                 )}
-                            </MessageContent>
-                          </Message>
-                          {isAssistant && isLastMessage && (
-                            <MessageActions>
-                              <MessageAction
-                                onClick={handleRegenerate}
-                                label="Retry"
-                              >
-                                <RefreshCcwIcon className="size-3" />
-                              </MessageAction>
-                              <MessageAction
-                                onClick={() =>
-                                  navigator.clipboard.writeText(part.text)
-                                }
-                                label="Copy"
-                              >
-                                <CopyIcon className="size-3" />
-                              </MessageAction>
-                            </MessageActions>
-                          )}
-                        </Fragment>
-                      );
-                    }
-                    default:
-                      return null;
-                  }
-                })}
-              </Fragment>
-            ))}
+                            </div>
+                          );
+                        })()
+                      ) : (
+                        <MessageResponse>{renderText}</MessageResponse>
+                      )}
+                    </MessageContent>
+                  </Message>
+                  {isAssistant && isLastMessage && (
+                    <MessageActions>
+                      <MessageAction
+                        onClick={handleRegenerate}
+                        label="Retry"
+                      >
+                        <RefreshCcwIcon className="size-3" />
+                      </MessageAction>
+                      <MessageAction
+                        onClick={() =>
+                          navigator.clipboard.writeText(textContent)
+                        }
+                        label="Copy"
+                      >
+                        <CopyIcon className="size-3" />
+                      </MessageAction>
+                    </MessageActions>
+                  )}
+                </Fragment>
+              );
+            })}
             {showOptimisticBubble && (
               <Message from="user">
                 <div className="w-full flex flex-row-reverse">
@@ -393,7 +470,7 @@ export function ChatInterface({
                 </MessageContent>
               </Message>
             )}
-            {showAssistantPending && (
+            {showStandalonePending && (
               <Message from="assistant">
                 <div className="w-full flex">
                   <div className="flex size-8 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
@@ -401,11 +478,7 @@ export function ChatInterface({
                   </div>
                 </div>
                 <MessageContent>
-                  <div className="flex items-center gap-1 py-1 px-1">
-                    <span className="w-2 h-2 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:0ms]" />
-                    <span className="w-2 h-2 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:150ms]" />
-                    <span className="w-2 h-2 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:300ms]" />
-                  </div>
+                  <LoadingDots />
                 </MessageContent>
               </Message>
             )}
