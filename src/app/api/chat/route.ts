@@ -3,21 +3,27 @@ import {
   generateText,
   createUIMessageStream,
   createUIMessageStreamResponse,
+  stepCountIs,
 } from "ai";
 import { chatModel } from "@/register/model";
-import { buildRagSystemPrompt } from "@/lib/rag-service";
+import { buildAgentSystemPrompt, buildRagSystemPrompt } from "@/lib/rag-service";
 import { prisma } from "@/lib/prisma";
 import { DEFAULT_VECTOR_TOP_K, DEFAULT_KEYWORD_TOP_K, DEFAULT_FINAL_TOP_K } from "@/lib/config";
 import type { RewriteMode } from "@/lib/query-rewriter";
 import { searchKnowledgeBase } from "@/lib/search-service";
 import {
   buildSnippet,
+  type AgentTraceStep,
   type AssistantMessageMetadata,
   type MessageReference,
 } from "@/lib/citations";
 import type { TraceCallback, TraceStep } from "@/lib/trace";
 import { buildIntro, type ChatUIMessage } from "@/lib/chat-stream";
+import { createRetrieveTool } from "@/lib/agent-tools";
 import type { RetrievalMode } from "@/lib/search-service";
+
+/** Max agent loop iterations — the safety guardrail against runaway loops. */
+const AGENT_MAX_STEPS = 6;
 
 export const maxDuration = 60;
 
@@ -79,6 +85,7 @@ export async function POST(req: Request) {
     conversationId,
     systemPrompt: providedSystemPrompt,
     mode,
+    agentMode,
     vectorTopK,
     keywordTopK,
     finalTopK,
@@ -92,6 +99,8 @@ export async function POST(req: Request) {
     conversationId?: string;
     systemPrompt?: string;
     mode?: "stream" | "eval";
+    /** When true (and a KB is selected), run the agent loop instead of the fixed pipeline. */
+    agentMode?: boolean;
     vectorTopK?: number;
     keywordTopK?: number;
     finalTopK?: number;
@@ -183,6 +192,90 @@ export async function POST(req: Request) {
   // `data-ready` marker, and finally the merged answer (model reasoning + text).
   const stream = createUIMessageStream<ChatUIMessage>({
     execute: async ({ writer }) => {
+      // --- Agent mode: model-driven retrieval loop (tools + stopWhen) ---
+      // Retrieval is no longer a fixed pre-generation step — the model calls
+      // `retrieveKnowledge` on demand and decides when it has enough. The
+      // pipeline branch below is untouched and still handles pipeline mode.
+      if (agentMode && knowledgeBaseId && query) {
+        const references: MessageReference[] = [];
+        const agentTrace: AgentTraceStep[] = [];
+
+        writer.write({
+          type: "data-plan",
+          data: {
+            mode: searchMode,
+            intro:
+              "Agent 模式:模型将自主决定检索策略与轮次,按需调用工具直到信息充分。",
+            agent: true,
+          },
+        });
+
+        // Fetch the KB name/description so the system prompt can tell the model
+        // WHAT is loaded. Without this the agent has no signal a KB exists and
+        // treats references like "这本小说" as ambiguous.
+        const kb = await prisma.knowledge_base.findUnique({
+          where: { id: knowledgeBaseId },
+          select: { name: true, description: true },
+        });
+
+        const retrieveKnowledge = createRetrieveTool({
+          kbId: knowledgeBaseId,
+          citations: references,
+          buildRefs: toReferences,
+          onCitations: (refs) =>
+            writer.write({ type: "data-citations", data: [...refs] }),
+          onToolCall: (step) => agentTrace.push(step),
+        });
+
+        // Same array references — populated during the loop, read at onFinish.
+        const agentMetadata: AssistantMessageMetadata = { references, agentTrace };
+
+        const result = streamText({
+          model: chatModel,
+          system: buildAgentSystemPrompt(kb?.name, kb?.description),
+          messages: normalizeMessages(messages),
+          tools: { retrieveKnowledge },
+          stopWhen: stepCountIs(AGENT_MAX_STEPS),
+          onFinish: async ({ response }) => {
+            if (!conversationId) return;
+            // In a multi-step loop, intermediate assistant messages hold tool
+            // calls (no text); the final answer is the text across all of them.
+            const text = response.messages
+              .filter((m) => m.role === "assistant")
+              .flatMap((m) =>
+                typeof m.content === "string"
+                  ? [m.content]
+                  : Array.isArray(m.content)
+                    ? m.content
+                        .filter(
+                          (p): p is { type: "text"; text: string } =>
+                            p.type === "text"
+                        )
+                        .map((p) => p.text)
+                    : []
+              )
+              .join("");
+            if (text) {
+              await prisma.conversation_message.create({
+                data: {
+                  conversation_id: conversationId,
+                  role: "assistant",
+                  content: text,
+                  metadata: agentMetadata as unknown as object,
+                },
+              });
+            }
+            await prisma.conversation.update({
+              where: { id: conversationId },
+              data: { updated_at: new Date() },
+            });
+          },
+        });
+
+        writer.merge(result.toUIMessageStream({ sendStart: false, sendFinish: false }));
+        return;
+      }
+
       let systemPrompt: string | undefined = providedSystemPrompt;
       let references: MessageReference[] = [];
       const traceSteps: TraceStep[] = [];

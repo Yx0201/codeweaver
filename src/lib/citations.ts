@@ -27,14 +27,30 @@ export interface MessageReference {
 }
 
 /**
+ * One entry in an Agent-mode thinking chain — a single `retrieveKnowledge`
+ * tool call. Persisted so the agent's decision timeline rehydrates on refresh
+ * (live `tool-*` parts are session-transient, just like the pipeline's
+ * `data-*` parts).
+ */
+export interface AgentTraceStep {
+  query: string;
+  searchMode: string;
+  count: number;
+  status: "done" | "error";
+  error?: string;
+}
+
+/**
  * Shape stored at `conversation_message.metadata` for assistant rows.
  * Keep flat + plain JSON so it round-trips cleanly through Prisma's Json
  * column and `JSON.stringify`/`JSON.parse` on the wire.
  */
 export interface AssistantMessageMetadata {
   references?: MessageReference[];
-  /** Retrieval pipeline trace — one entry per pipeline step. */
+  /** Retrieval pipeline trace — one entry per pipeline step (pipeline mode). */
   trace?: TraceStep[];
+  /** Agent tool-call timeline — one entry per `retrieveKnowledge` call (agent mode). */
+  agentTrace?: AgentTraceStep[];
 }
 
 /** Take the first ~N characters of `text`, stripping noisy whitespace. */
@@ -59,7 +75,11 @@ export function readAssistantMetadata(
   metadata: unknown
 ): AssistantMessageMetadata | undefined {
   if (!metadata || typeof metadata !== "object") return undefined;
-  const m = metadata as { references?: unknown; trace?: unknown };
+  const m = metadata as {
+    references?: unknown;
+    trace?: unknown;
+    agentTrace?: unknown;
+  };
 
   const references = Array.isArray(m.references)
     ? m.references.filter(
@@ -82,11 +102,28 @@ export function readAssistantMetadata(
       )
     : undefined;
 
+  const agentTrace = Array.isArray(m.agentTrace)
+    ? m.agentTrace.filter(
+        (s): s is AgentTraceStep =>
+          typeof s === "object" &&
+          s !== null &&
+          typeof (s as AgentTraceStep).query === "string" &&
+          typeof (s as AgentTraceStep).count === "number"
+      )
+    : undefined;
+
   if (references.length > 0) {
-    return { references, ...(trace ? { trace } : {}) };
+    return {
+      references,
+      ...(trace ? { trace } : {}),
+      ...(agentTrace ? { agentTrace } : {}),
+    };
   }
   if (trace && trace.length > 0) {
     return { trace };
+  }
+  if (agentTrace && agentTrace.length > 0) {
+    return { agentTrace };
   }
   return undefined;
 }

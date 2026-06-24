@@ -65,45 +65,16 @@ export interface CitationJumpDetail {
 }
 
 /**
- * Bidirectional highlight channel: any side (a `[N]` chip or a reference row)
- * broadcasts the index it wants to spotlight; the other side highlights its
- * matching element. `index: null` clears the current highlight.
- *
- * Used by M5 sentence-level cross-reference linking.
- */
-export const CITATION_ACTIVATE_EVENT = "citation-activate";
-
-export interface CitationActivateDetail {
-  messageId: string;
-  index: number | null;
-}
-
-/** Spotlight reference `index` for `messageId`, or clear with `null`. */
-export function activateCitation(
-  messageId: string,
-  index: number | null
-): void {
-  window.dispatchEvent(
-    new CustomEvent<CitationActivateDetail>(CITATION_ACTIVATE_EVENT, {
-      detail: { messageId, index },
-    })
-  );
-}
-
-/**
  * Renders the reference list below an assistant answer + a preview dialog
  * for the full chunk text. Click a list row → open dialog with the source
- * filename and the original chunk content.
+ * filename and the original chunk content. Click a `[N]` chip in the answer
+ * → the list expands, scrolls to the matching row, and highlights it.
  */
 export function CitationList({ messageId, references }: CitationListProps) {
   const [active, setActive] = useState<MessageReference | null>(null);
-  // We track the most recently jumped-to index so we can keep a soft highlight
-  // on the row a `[N]` anchor pointed at.
+  // The most recently jumped-to index — keeps a soft highlight on the row a
+  // `[N]` anchor pointed at.
   const [highlighted, setHighlighted] = useState<number | null>(null);
-  // Index currently spotlighted via the bidirectional activate channel
-  // (hover a `[N]` chip OR hover a row). Drives the cross-highlight with the
-  // answer's `[N]` anchors.
-  const [activated, setActivated] = useState<number | null>(null);
   // The reference list is collapsible. It starts expanded (it only appears
   // once the answer has finished streaming), but the user can fold it away.
   const [expanded, setExpanded] = useState(false);
@@ -148,18 +119,6 @@ export function CitationList({ messageId, references }: CitationListProps) {
     return () => window.removeEventListener(CITATION_JUMP_EVENT, handler);
   }, [references, messageId]);
 
-  // M5 bidirectional link: when a `[N]` chip (or another row) is hovered/
-  // focused, it broadcasts its index; we highlight the matching row here.
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<CitationActivateDetail>).detail;
-      if (!detail || detail.messageId !== messageId) return;
-      setActivated(detail.index);
-    };
-    window.addEventListener(CITATION_ACTIVATE_EVENT, handler);
-    return () => window.removeEventListener(CITATION_ACTIVATE_EVENT, handler);
-  }, [messageId]);
-
   return (
     <>
       <section
@@ -185,7 +144,7 @@ export function CitationList({ messageId, references }: CitationListProps) {
         {expanded && (
         <ol className="mt-2.5 space-y-1">
           {references.map((ref) => {
-            const isActive = highlighted === ref.index || activated === ref.index;
+            const isActive = highlighted === ref.index;
             const src = SOURCE_STYLE[ref.source] ?? SOURCE_STYLE.vector;
             const scoreLabel =
               ref.rerankScore != null
@@ -201,10 +160,6 @@ export function CitationList({ messageId, references }: CitationListProps) {
                     setActive(ref);
                     setHighlighted(ref.index);
                   }}
-                  onMouseEnter={() => activateCitation(messageId, ref.index)}
-                  onMouseLeave={() => activateCitation(messageId, null)}
-                  onFocus={() => activateCitation(messageId, ref.index)}
-                  onBlur={() => activateCitation(messageId, null)}
                   className={cn(
                     "group flex w-full items-start gap-2.5 rounded-md px-2 py-1.5 text-left transition-colors",
                     "hover:bg-accent/50",

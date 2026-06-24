@@ -17,7 +17,7 @@ import type { AssistantMessageMetadata, MessageReference } from "@/lib/citations
  *  - ready     : "信息收集完毕" marker emitted between retrieval and the answer.
  */
 export type ChatDataParts = {
-  plan: { mode: RetrievalMode; intro: string };
+  plan: { mode: RetrievalMode; intro: string; agent?: boolean };
   trace: TraceStep;
   citations: MessageReference[];
   ready: { contextCount: number };

@@ -10,7 +10,9 @@ import {
   Conversation,
   ConversationContent,
   ConversationScrollButton,
+  ChatScrollController,
 } from "@/components/ai-elements/conversation";
+import { useChatScroll } from "@/components/settings/chat-scroll-provider";
 import {
   PromptInput,
   type PromptInputMessage,
@@ -32,6 +34,7 @@ import {
 } from "@/components/ui/select";
 import { createConversation, type SearchMode } from "@/actions/conversation";
 import type {
+  AgentTraceStep,
   AssistantMessageMetadata,
   MessageReference,
 } from "@/lib/citations";
@@ -39,6 +42,7 @@ import type { TraceStep } from "@/lib/trace";
 import type { ChatDataParts } from "@/lib/chat-stream";
 import { CitationList } from "./citation-list";
 import { ThinkingChain } from "./thinking-chain";
+import { AgentThinkingChain } from "./agent-thinking-chain";
 import {
   CitationAnchor,
   preprocessCitations,
@@ -104,6 +108,10 @@ export function ChatInterface({
   const [searchMode, setSearchMode] = useState<SearchMode>(
     initialSearchMode ?? "hybrid"
   );
+  // Agent vs pipeline engine — a per-session client preference (default
+  // pipeline, the safe, fast path). Sent on every sendMessage/regenerate; not
+  // persisted to the DB in this iteration, so a refresh resets to pipeline.
+  const [agentMode, setAgentMode] = useState(false);
   // ref to track the current conversationId without causing re-renders
   const conversationIdRef = useRef(conversationId);
   useEffect(() => {
@@ -162,6 +170,25 @@ export function ChatInterface({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     messages: initialMessages as any,
   });
+
+  // Chat scroll behavior is a cross-conversation preference stored in
+  // localStorage (see ChatScrollProvider). force-bottom mode uses the
+  // ChatScrollController below to pin the viewport to the newest reply.
+  const { scrollMode } = useChatScroll();
+
+  // A value that changes as the streaming assistant reply grows — used by
+  // ChatScrollController to re-pin to the bottom on each content tick. We use
+  // the text length of the last message (sum of its text parts) so every
+  // streamed chunk bumps the signature and triggers a re-scroll.
+  const lastMessage = messages[messages.length - 1];
+  const lastMessageSignature = lastMessage
+    ? lastMessage.parts
+        .filter((p) => p.type === "text")
+        .reduce(
+          (acc, p) => acc + ((p as { text?: string }).text?.length ?? 0),
+          0
+        )
+    : 0;
 
   useEffect(() => {
     if (status === "ready" || status === "error") {
@@ -239,6 +266,7 @@ export function ChatInterface({
             conversationId: convId,
             ...(kbId ? { knowledgeBaseId: kbId } : {}),
             searchMode,
+            agentMode,
           },
         }
       ).catch((error) => {
@@ -261,6 +289,7 @@ export function ChatInterface({
         conversationId: conversationIdRef.current,
         ...(kbId ? { knowledgeBaseId: kbId } : {}),
         searchMode,
+        agentMode,
       },
     });
   };
@@ -269,7 +298,6 @@ export function ChatInterface({
   // submit button into a stop control and to relax the empty-input disable.
   const isGenerating = status === "submitted" || status === "streaming";
 
-  const lastMessage = messages[messages.length - 1];
   const lastMessageIsAssistant = lastMessage?.role === "assistant";
 
   // The optimistic bubble is shown only in the pre-send window (status "ready",
@@ -287,12 +315,12 @@ export function ChatInterface({
   const showStandalonePending =
     optimisticUserText !== null || (isGenerating && !lastMessageIsAssistant);
 
-  return (
-    <div className="w-full mx-auto p-6 relative h-full">
-      <div className="flex flex-col h-full">
-        <Conversation className="min-h-0">
-          <ConversationContent>
-            {messages.map((message, messageIndex) => {
+  // The message list + optimistic/standalone bubbles. Rendered identically in
+  // both scroll modes; only the outer container differs (native scroll for
+  // "free", StickToBottom for the sticky modes).
+  const messageNodes = (
+    <>
+      {messages.map((message, messageIndex) => {
               const isLastMessage = messageIndex === messages.length - 1;
               const isAssistant = message.role === "assistant";
               // While the answer is still streaming we hold the citation list
@@ -323,9 +351,9 @@ export function ChatInterface({
                     .map((p) => p.data as TraceStep)
                 : [];
               const liveCitations = isAssistant
-                ? (parts.find((p) => p.type === "data-citations")?.data as
-                    | MessageReference[]
-                    | undefined)
+                ? (parts
+                    .filter((p) => p.type === "data-citations")
+                    .at(-1)?.data as MessageReference[] | undefined)
                 : undefined;
               const readySignal = isAssistant
                 ? parts.some((p) => p.type === "data-ready")
@@ -340,6 +368,22 @@ export function ChatInterface({
                   : isAssistant
                     ? messageMetadata?.trace ?? []
                     : [];
+              // Agent-mode detection: a `data-plan` with `agent:true` (live),
+              // any `tool-*` part (live), or a persisted `agentTrace` (rehydrated).
+              const agentTrace: AgentTraceStep[] | undefined = isAssistant
+                ? messageMetadata?.agentTrace
+                : undefined;
+              const hasLiveToolParts =
+                isAssistant &&
+                parts.some(
+                  (p) =>
+                    typeof p.type === "string" && p.type.startsWith("tool-")
+                );
+              const isAgentMessage =
+                isAssistant &&
+                (!!planPart?.agent ||
+                  hasLiveToolParts ||
+                  (agentTrace?.length ?? 0) > 0);
               // Gather reasoning + text up front so the answer renders as a
               // single unified block in the order thinking → text → citations,
               // instead of one bubble per part.
@@ -390,22 +434,35 @@ export function ChatInterface({
                         // loading state never looks boxed-in.
                         (() => {
                           const hasThinking =
+                            isAgentMessage ||
                             !!planPart?.intro ||
                             trace.length > 0 ||
                             reasoningText.length > 0;
                           const hasAnswer = textContent.trim().length > 0;
                           return (
                             <div className="w-full">
-                              {hasThinking && (
-                                <ThinkingChain
-                                  intro={planPart?.intro}
-                                  mode={planPart?.mode}
-                                  steps={trace}
-                                  reasoningText={reasoningText}
-                                  streaming={isStreamingThisMessage}
-                                  ready={readySignal}
-                                />
-                              )}
+                              {hasThinking &&
+                                (isAgentMessage ? (
+                                  <AgentThinkingChain
+                                    intro={planPart?.intro}
+                                    parts={
+                                      message.parts as Array<
+                                        Record<string, unknown>
+                                      >
+                                    }
+                                    agentTrace={agentTrace}
+                                    streaming={isStreamingThisMessage}
+                                  />
+                                ) : (
+                                  <ThinkingChain
+                                    intro={planPart?.intro}
+                                    mode={planPart?.mode}
+                                    steps={trace}
+                                    reasoningText={reasoningText}
+                                    streaming={isStreamingThisMessage}
+                                    ready={readySignal}
+                                  />
+                                ))}
                               {hasAnswer ? (
                                 <div className="pt-1">
                                   <MessageResponse
@@ -482,9 +539,34 @@ export function ChatInterface({
                 </MessageContent>
               </Message>
             )}
-          </ConversationContent>
-          <ConversationScrollButton />
-        </Conversation>
+    </>
+  );
+
+  return (
+    <div className="w-full mx-auto p-6 relative h-full">
+      <div className="flex flex-col h-full">
+        {scrollMode === "free" ? (
+          // Free mode: a plain native scroll container. The browser does NOT
+          // react to content growth, so the scrollbar is entirely under user
+          // control — new AI output simply grows below the current viewport.
+          <div
+            className="relative flex-1 overflow-y-auto min-h-0"
+            role="log"
+          >
+            <div className="flex flex-col gap-8 p-4">{messageNodes}</div>
+          </div>
+        ) : (
+          <Conversation className="min-h-0">
+            <ConversationContent>{messageNodes}</ConversationContent>
+            <ChatScrollController
+              mode={scrollMode}
+              status={status}
+              messageCount={messages.length}
+              lastMessageSignature={lastMessageSignature}
+            />
+            <ConversationScrollButton />
+          </Conversation>
+        )}
 
         <div className="mt-4 w-full max-w-2xl mx-auto shrink-0 animate-rise-in">
           <PromptInput
@@ -525,29 +607,64 @@ export function ChatInterface({
                   </SelectContent>
                 </Select>
 
-                {/* Only three fixed, short modes — a segmented control shows the
-                    active state at a glance instead of hiding it in a dropdown. */}
+                {/* Engine toggle: pipeline (fixed retrieval, fast) vs Agent
+                    (model-driven retrieval loop, richer thinking chain). In
+                    Agent mode the model picks the channel itself, so the
+                    per-channel control below is hidden. */}
                 <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
-                  {SEARCH_MODES.map((mode) => {
-                    const active = searchMode === mode.value;
-                    return (
-                      <button
-                        key={mode.value}
-                        type="button"
-                        onClick={() => handleSearchModeChange(mode.value)}
-                        aria-pressed={active}
-                        className={cn(
-                          "h-6 rounded-[5px] px-2 text-xs font-medium transition-colors",
-                          active
-                            ? "bg-primary/15 text-primary ring-1 ring-primary/25"
-                            : "text-muted-foreground hover:bg-accent hover:text-foreground"
-                        )}
-                      >
-                        {mode.label}
-                      </button>
-                    );
-                  })}
+                  <button
+                    type="button"
+                    onClick={() => setAgentMode(false)}
+                    aria-pressed={!agentMode}
+                    className={cn(
+                      "h-6 rounded-[5px] px-2 text-xs font-medium transition-colors",
+                      !agentMode
+                        ? "bg-primary/15 text-primary ring-1 ring-primary/25"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                    )}
+                  >
+                    流水线
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAgentMode(true)}
+                    aria-pressed={agentMode}
+                    className={cn(
+                      "h-6 rounded-[5px] px-2 text-xs font-medium transition-colors",
+                      agentMode
+                        ? "bg-primary/15 text-primary ring-1 ring-primary/25"
+                        : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                    )}
+                  >
+                    Agent
+                  </button>
                 </div>
+
+                {/* Per-channel retrieval modes — pipeline only. Agent mode
+                    lets the model choose the channel per query. */}
+                {!agentMode && (
+                  <div className="flex items-center gap-0.5 rounded-md bg-muted/50 p-0.5">
+                    {SEARCH_MODES.map((mode) => {
+                      const active = searchMode === mode.value;
+                      return (
+                        <button
+                          key={mode.value}
+                          type="button"
+                          onClick={() => handleSearchModeChange(mode.value)}
+                          aria-pressed={active}
+                          className={cn(
+                            "h-6 rounded-[5px] px-2 text-xs font-medium transition-colors",
+                            active
+                              ? "bg-primary/15 text-primary ring-1 ring-primary/25"
+                              : "text-muted-foreground hover:bg-accent hover:text-foreground"
+                          )}
+                        >
+                          {mode.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </PromptInputTools>
 
               <PromptInputSubmit
