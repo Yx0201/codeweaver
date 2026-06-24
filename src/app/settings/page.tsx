@@ -1,5 +1,6 @@
-import { Palette } from "lucide-react";
+import { Palette, MessageSquare } from "lucide-react";
 import { ThemeSwitcher } from "./_components/theme-switcher";
+import { ScrollModeSwitcher } from "./_components/scroll-mode-switcher";
 
 export default function SettingsPage() {
   return (
@@ -39,6 +40,30 @@ export default function SettingsPage() {
           </div>
 
           <ThemeSwitcher />
+        </section>
+
+        <section
+          aria-labelledby="chat-heading"
+          className="mt-6 rounded-xl border border-border bg-card/40 p-6"
+        >
+          <div className="mb-5 flex items-start gap-3">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15">
+              <MessageSquare className="size-5" strokeWidth={1.75} />
+            </span>
+            <div>
+              <h2
+                id="chat-heading"
+                className="text-base font-semibold tracking-tight"
+              >
+                聊天
+              </h2>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                控制 AI 回复时滚动条的行为。
+              </p>
+            </div>
+          </div>
+
+          <ScrollModeSwitcher />
         </section>
       </div>
     </div>

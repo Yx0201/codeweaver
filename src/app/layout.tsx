@@ -7,6 +7,7 @@ import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { ThemeProvider, themeInitScript } from "@/components/theme/theme-provider";
+import { ChatScrollProvider } from "@/components/settings/chat-scroll-provider";
 import { Analytics } from "@vercel/analytics/react";
 import { SpeedInsights } from "@vercel/speed-insights/next"
 
@@ -55,7 +56,8 @@ export default function RootLayout({
           }}
         />
         <ThemeProvider>
-          <TooltipProvider>
+          <ChatScrollProvider>
+            <TooltipProvider>
             {/* open={false} locks the sidebar in its icon-only collapsed state;
                 with no trigger it can never expand — hover reveals the label
                 via each item's tooltip. */}
@@ -68,6 +70,7 @@ export default function RootLayout({
               </SidebarInset>
             </SidebarProvider>
           </TooltipProvider>
+          </ChatScrollProvider>
         </ThemeProvider>
         {/* Vercel Analytics — 自动上报 page view,仅在 Vercel 环境生效 */}
         <Analytics />

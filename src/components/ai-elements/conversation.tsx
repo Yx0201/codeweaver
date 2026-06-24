@@ -4,9 +4,10 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { UIMessage } from "ai";
 import { ArrowDownIcon, DownloadIcon } from "lucide-react";
-import type { ComponentProps } from "react";
-import { useCallback } from "react";
+import { type ComponentProps, useCallback, useEffect } from "react";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
+
+export type ChatScrollMode = "bottom-auto" | "force-bottom" | "free";
 
 export type ConversationProps = ComponentProps<typeof StickToBottom>;
 
@@ -33,6 +34,57 @@ export const ConversationContent = ({
     {...props}
   />
 );
+
+export type ChatScrollControllerProps = {
+  mode: ChatScrollMode;
+  /**
+   * `useChat` status: "ready" | "submitted" | "streaming" | "error". Drives
+   * when to lock the user to the bottom in force-bottom mode.
+   */
+  status: string;
+  /** messages.length — a new message signals "user just sent". */
+  messageCount: number;
+  /**
+   * A value that changes as the streaming assistant reply grows (e.g. the
+   * length of the last message's text). Used to re-pin to the bottom on each
+   * content tick without scrolling on every animation frame.
+   */
+  lastMessageSignature: number;
+};
+
+/**
+ * Imperative scroll control layered on top of StickToBottom's declarative
+ * behavior. Must be rendered inside <Conversation> so it can reach the
+ * stick-to-bottom context.
+ *
+ * Only force-bottom mode is active here:
+ * - the instant a message is sent (status -> "submitted"), jump to the bottom;
+ * - while streaming, on every content growth tick, force-scroll to the bottom
+ *   with `ignoreEscapes` so the user cannot scroll away from the latest reply.
+ *
+ * bottom-auto relies entirely on the library's native stickiness; free mode
+ * never renders <Conversation> at all (a plain native-scroll div is used
+ * instead), so the controller is only ever mounted for the two sticky modes.
+ */
+export const ChatScrollController = ({
+  mode,
+  status,
+  messageCount,
+  lastMessageSignature,
+}: ChatScrollControllerProps) => {
+  const { scrollToBottom } = useStickToBottomContext();
+
+  useEffect(() => {
+    if (mode !== "force-bottom") return;
+    if (status === "submitted" || status === "streaming") {
+      scrollToBottom({ ignoreEscapes: true });
+    }
+    // We intentionally depend on the signature/count so we re-pin on every
+    // content growth tick; ignoreEscapes keeps the user locked at the bottom.
+  }, [mode, status, messageCount, lastMessageSignature, scrollToBottom]);
+
+  return null;
+};
 
 export type ConversationEmptyStateProps = ComponentProps<"div"> & {
   title?: string;
