@@ -11,12 +11,17 @@ import {
  * Convert bare `[N]` markers inside assistant text into markdown links that
  * point at the corresponding citation row, e.g. `[3]` → `[3](#cite-<id>~3)`.
  *
- * Only indices that exist in the reference list are converted — anything out
- * of range stays as plain text so the model can't "invent" a clickable [99]
- * that has no entry below.
+ * Every numeric `[N]` is resolved one way or another so none can slip through
+ * to the markdown renderer as a broken/undefined link (which rehype-harden
+ * would render as `[blocked]`):
+ *  - in range  → clickable `[N](#cite-<id>~N)` chip
+ *  - out of range → escaped `\[N\]`, rendered as literal `[N]` text (the model
+ *    cited a non-existent reference — show it honestly, but never as a link)
  *
- * Real markdown links of the form `[1](http://…)` are left alone via the
- * negative lookahead on `(`.
+ * The model occasionally emits `[N](url)` or a broken `[N]()` instead of a
+ * bare `[N]`; the optional `(...)` group strips that so the marker still
+ * becomes a clean chip. Non-numeric brackets (real links like `[see this](…)`)
+ * are untouched because the pattern requires `\d+`.
  */
 export function preprocessCitations(
   text: string,
@@ -24,9 +29,11 @@ export function preprocessCitations(
   messageId: string
 ): string {
   if (referenceCount <= 0) return text;
-  return text.replace(/\[(\d+)\](?!\()/g, (match, raw) => {
+  return text.replace(/\[(\d+)\](?:\([^)]*\))?/g, (_match, raw) => {
     const n = Number.parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < 1 || n > referenceCount) return match;
+    if (!Number.isFinite(n) || n < 1 || n > referenceCount) {
+      return `\\[${n}\\]`;
+    }
     return `[${n}](#${citationAnchorId(messageId, n)})`;
   });
 }

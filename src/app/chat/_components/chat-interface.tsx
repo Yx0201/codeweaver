@@ -467,6 +467,20 @@ export function ChatInterface({
                                 <div className="pt-1">
                                   <MessageResponse
                                     components={assistantStreamdownComponents}
+                                    // Disable Streamdown's lenient "incomplete
+                                    // markdown" parsing. During streaming it
+                                    // leaves the last inline link's href
+                                    // undefined (more URL might be coming),
+                                    // which rehype-harden then renders as
+                                    // "[blocked]" — so citation chips like
+                                    // [16][28][7] would show the last one as
+                                    // blocked. Strict parsing renders a
+                                    // half-arrived [7 as literal text and a
+                                    // complete [7] as a chip, never a blocked
+                                    // link. Rehydrated (complete) text was
+                                    // already correct because it parses in one
+                                    // shot.
+                                    parseIncompleteMarkdown={false}
                                   >
                                     {renderText}
                                   </MessageResponse>
