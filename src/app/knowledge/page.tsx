@@ -1,11 +1,18 @@
 export const dynamic = "force-dynamic";
+import { redirect } from "next/navigation";
 import { FolderOpen } from "lucide-react";
 import { prisma } from "@/lib/prisma";
+import { auth } from "@/auth";
 import { CreateKnowledgeDialog } from "./_components/create-knowledge-dialog";
 import { KnowledgeBaseCard } from "./_components/knowledge-base-card";
 
 export default async function KnowledgePage() {
+  const session = await auth();
+  if (!session?.user?.id) redirect("/login");
+  const userId = session.user.id;
+
   const knowledgeBases = await prisma.knowledge_base.findMany({
+    where: { user_id: userId },
     orderBy: { created_at: "desc" },
     include: { _count: { select: { uploaded_files: true } } },
   });

@@ -10,6 +10,7 @@ import { ThemeProvider, themeInitScript } from "@/components/theme/theme-provide
 import { ChatScrollProvider } from "@/components/settings/chat-scroll-provider";
 import { Analytics } from "@vercel/analytics/react";
 import { SpeedInsights } from "@vercel/speed-insights/next"
+import { auth } from "@/auth";
 
 const geist = Geist({ subsets: ["latin"], variable: "--font-sans" });
 const geistMono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono" });
@@ -20,11 +21,16 @@ export const metadata: Metadata = {
     "Retrieval-augmented chat over your documents, with an interactive knowledge graph.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // 登录态决定外壳:已登录渲染 sidebar 应用壳;未登录(middleware 已将
+  // 未登录用户导向 /login、/register)渲染全屏,供 auth 页面居中布局。
+  const session = await auth();
+  const isAuthed = !!session?.user;
+
   return (
     <html
       lang="zh-CN"
@@ -57,19 +63,29 @@ export default function RootLayout({
         />
         <ThemeProvider>
           <ChatScrollProvider>
-            <TooltipProvider>
-            {/* open={false} locks the sidebar in its icon-only collapsed state;
-                with no trigger it can never expand — hover reveals the label
-                via each item's tooltip. */}
-            <SidebarProvider open={false}>
-              <AppSidebar />
-              <SidebarInset className="mt-2 mr-2 mb-2 border rounded-xl border-border bg-popover shadow-(--shadow-ambient)">
-                <main className="flex-1 overflow-auto flex flex-col">
-                  {children}
-                </main>
-              </SidebarInset>
-            </SidebarProvider>
-          </TooltipProvider>
+            {isAuthed ? (
+              <TooltipProvider>
+                {/* open={false} locks the sidebar in its icon-only collapsed state;
+                    with no trigger it can never expand — hover reveals the label
+                    via each item's tooltip. */}
+                <SidebarProvider open={false}>
+                  <AppSidebar
+                    user={{
+                      name: session.user.name,
+                      email: session.user.email,
+                      image: session.user.image,
+                    }}
+                  />
+                  <SidebarInset className="mt-2 mr-2 mb-2 border rounded-xl border-border bg-popover shadow-(--shadow-ambient)">
+                    <main className="flex-1 overflow-auto flex flex-col">
+                      {children}
+                    </main>
+                  </SidebarInset>
+                </SidebarProvider>
+              </TooltipProvider>
+            ) : (
+              <main className="flex-1 overflow-auto">{children}</main>
+            )}
           </ChatScrollProvider>
         </ThemeProvider>
         {/* Vercel Analytics — 自动上报 page view,仅在 Vercel 环境生效 */}

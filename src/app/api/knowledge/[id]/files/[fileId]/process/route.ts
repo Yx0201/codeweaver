@@ -28,6 +28,7 @@ import {
   updateStepState,
   type UploadPipelineState,
 } from "@/lib/upload-processing";
+import { requireUserId, unauthorized } from "@/lib/auth-guard";
 
 export const maxDuration = 300;
 
@@ -528,6 +529,8 @@ async function runFinalizeStage(knowledgeBaseId: number, state: UploadPipelineSt
 }
 
 export async function GET(_req: NextRequest, { params }: RouteParams) {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
   const { id, fileId } = await params;
   const knowledgeBaseId = parseInt(id, 10);
 
@@ -539,6 +542,7 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
     where: {
       id: fileId,
       knowledge_base_id: knowledgeBaseId,
+      knowledge_base: { user_id: userId },
     },
     select: {
       id: true,
@@ -561,6 +565,8 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
 }
 
 export async function POST(_req: NextRequest, { params }: RouteParams) {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
   const { id, fileId } = await params;
   const knowledgeBaseId = parseInt(id, 10);
 
@@ -572,6 +578,7 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
     where: {
       id: fileId,
       knowledge_base_id: knowledgeBaseId,
+      knowledge_base: { user_id: userId },
     },
     select: {
       id: true,

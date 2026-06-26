@@ -1,6 +1,9 @@
 import { buildRagSystemPrompt } from "@/lib/rag-service";
+import { requireUserId, unauthorized } from "@/lib/auth-guard";
 
 export async function POST(req: Request) {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
   const { contexts } = await req.json();
 
   if (!contexts || !Array.isArray(contexts) || contexts.length === 0) {

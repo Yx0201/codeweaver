@@ -15,6 +15,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
+import { UserMenu, type SessionUser } from "@/components/layout/user-menu";
 
 const menuItems = [
   {
@@ -51,7 +52,7 @@ function WeaveMark({ className }: { className?: string }) {
   );
 }
 
-export function AppSidebar() {
+export function AppSidebar({ user }: { user?: SessionUser }) {
   const pathname = usePathname();
 
   return (
@@ -118,6 +119,7 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
+        {user && <UserMenu user={user} />}
         <SidebarMenu>
           <SidebarMenuItem>
             <SidebarMenuButton

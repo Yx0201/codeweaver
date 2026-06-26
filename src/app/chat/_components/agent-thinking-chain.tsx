@@ -81,17 +81,34 @@ export function AgentThinkingChain({
   const [override, setOverride] = useState<boolean | null>(null);
   const expanded = override ?? !!streaming;
 
-  // Build an ordered timeline from live parts (reasoning + tool calls mixed).
+  // Index of the last tool call. Text after it is the FINAL answer (rendered
+  // outside this chain); text before/among tool calls is the model narrating
+  // its plan, which belongs inline here at its real chronological position.
+  let lastToolIdx = -1;
+  parts.forEach((p, i) => {
+    if (typeof p.type === "string" && p.type.startsWith("tool-")) lastToolIdx = i;
+  });
+
+  // Build an ordered timeline from live parts: reasoning + tool calls +
+  // pre-answer narration text, interleaved in arrival order.
   const timeline = parts
+    .map((p, i) => ({ p, i }))
     .filter(
-      (p) =>
+      ({ p, i }) =>
         typeof p.type === "string" &&
-        (p.type === "reasoning" || p.type.startsWith("tool-"))
+        (p.type === "reasoning" ||
+          p.type.startsWith("tool-") ||
+          (p.type === "text" && i < lastToolIdx))
     )
-    .map((p) =>
+    .map(({ p }) =>
       p.type === "reasoning"
         ? { kind: "reasoning" as const, part: p as unknown as ReasoningPart }
-        : { kind: "task" as const, part: p as unknown as RetrieveToolPart }
+        : p.type === "text"
+          ? {
+              kind: "narration" as const,
+              part: p as unknown as { type: string; text?: string },
+            }
+          : { kind: "task" as const, part: p as unknown as RetrieveToolPart }
     );
 
   const taskCount = timeline.filter((t) => t.kind === "task").length;
@@ -138,6 +155,12 @@ export function AgentThinkingChain({
               item.kind === "reasoning" ? (
                 <ReasoningBlock
                   key={`r${i}`}
+                  text={item.part.text ?? ""}
+                  streaming={!!streaming}
+                />
+              ) : item.kind === "narration" ? (
+                <NarrationBlock
+                  key={`n${i}`}
                   text={item.part.text ?? ""}
                   streaming={!!streaming}
                 />
@@ -206,6 +229,31 @@ function ReasoningBlock({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Pre-answer narration — the model "thinking out loud" in plain content tokens
+ * (e.g. "先分别检索世界观和主要角色") before/between tool calls. Distinct from
+ * `ReasoningBlock` (collapsible reasoning tokens); this is regular model speech
+ * shown inline at its chronological spot so it no longer leaks into the answer.
+ */
+function NarrationBlock({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  return (
+    <p className="whitespace-pre-wrap break-words px-1 text-muted-foreground">
+      {trimmed}
+      {streaming && (
+        <span className="ml-0.5 inline-block h-3 w-1.5 animate-pulse bg-muted-foreground/60 align-middle" />
+      )}
+    </p>
   );
 }
 

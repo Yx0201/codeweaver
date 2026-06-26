@@ -1,11 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { requireUserId, unauthorized } from "@/lib/auth-guard";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
 export async function PATCH(req: NextRequest, { params }: RouteParams) {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
   const { id } = await params;
   const body = await req.json();
   const knowledgeBaseId = body.knowledgeBaseId ?? null;
@@ -17,7 +20,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
 
   try {
     await prisma.conversation.update({
-      where: { id },
+      where: { id, user_id: userId },
       data,
     });
     return NextResponse.json({ success: true });

@@ -1,9 +1,10 @@
 export const dynamic = "force-dynamic";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { prisma } from "@/lib/prisma";
+import { auth } from "@/auth";
 
 interface PageProps {
   params: Promise<{ id: string; fileId: string }>;
@@ -23,10 +24,16 @@ function normalizePreviewText(text: string | null): string | null {
 }
 
 export default async function FilePreviewPage({ params }: PageProps) {
+  const session = await auth();
+  if (!session?.user?.id) redirect("/login");
+  const userId = session.user.id;
+
   const { id, fileId } = await params;
 
-  const file = await prisma.uploaded_files.findUnique({
-    where: { id: fileId },
+  // findUnique 不支持跨表过滤,改 findFirst 并带 knowledge_base.user_id
+  // 校验归属,防止越权预览他人文件。
+  const file = await prisma.uploaded_files.findFirst({
+    where: { id: fileId, knowledge_base: { user_id: userId } },
     select: {
       id: true,
       filename: true,
@@ -35,10 +42,6 @@ export default async function FilePreviewPage({ params }: PageProps) {
       upload_time: true,
       status: true,
       content: true,
-      // Intentionally NOT selecting file_data: the preview uses `content`
-      // (text) only. Reading the bytea column would trigger the Neon
-      // driver's `new Buffer()` parse (Node DEP0005) for no benefit here.
-      // Binary download is served by /api/files/[fileId] instead.
     },
   });
 

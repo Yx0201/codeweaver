@@ -1,10 +1,11 @@
 export const dynamic = "force-dynamic";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft, BookOpen, FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getKnowledgeGraphData } from "@/lib/knowledge-graph";
 import { prisma } from "@/lib/prisma";
+import { auth } from "@/auth";
 import { parseUploadPipelineState } from "@/lib/upload-processing";
 import { KnowledgeGraphPanel } from "./_components/knowledge-graph-panel";
 import { UploadFileButton } from "./_components/upload-file-button";
@@ -29,10 +30,21 @@ function formatDate(date: Date | null): string {
 }
 
 export default async function KnowledgeBasePage({ params }: PageProps) {
+  const session = await auth();
+  if (!session?.user?.id) redirect("/login");
+  const userId = session.user.id;
+
   const { id } = await params;
   const knowledgeBaseId = parseInt(id);
 
   if (isNaN(knowledgeBaseId)) notFound();
+
+  // 先校验归属:不属于当前用户的 KB 直接 404,不暴露存在性。
+  const owned = await prisma.knowledge_base.findFirst({
+    where: { id: knowledgeBaseId, user_id: userId },
+    select: { id: true },
+  });
+  if (!owned) notFound();
 
   const [knowledgeBase, files, graph] = await Promise.all([
     prisma.knowledge_base.findUnique({ where: { id: knowledgeBaseId } }),

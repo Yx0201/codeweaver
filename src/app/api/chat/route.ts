@@ -21,6 +21,7 @@ import type { TraceCallback, TraceStep } from "@/lib/trace";
 import { buildIntro, type ChatUIMessage } from "@/lib/chat-stream";
 import { createRetrieveTool } from "@/lib/agent-tools";
 import type { RetrievalMode } from "@/lib/search-service";
+import { requireUserId, unauthorized } from "@/lib/auth-guard";
 
 /** Max agent loop iterations — the safety guardrail against runaway loops. */
 const AGENT_MAX_STEPS = 6;
@@ -109,6 +110,31 @@ export async function POST(req: Request) {
     queryRewriteMode?: RewriteMode;
     searchMode?: RetrievalMode;
   } = await req.json();
+
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
+
+  // 若带 conversationId,校验归属当前用户,防止越权向他人对话写消息。
+  if (conversationId) {
+    const owned = await prisma.conversation.findFirst({
+      where: { id: conversationId, user_id: userId },
+      select: { id: true },
+    });
+    if (!owned) {
+      return Response.json({ error: "对话不存在或无权访问" }, { status: 404 });
+    }
+  }
+
+  // 若带 knowledgeBaseId,校验归属当前用户。
+  if (knowledgeBaseId) {
+    const ownedKb = await prisma.knowledge_base.findFirst({
+      where: { id: knowledgeBaseId, user_id: userId },
+      select: { id: true },
+    });
+    if (!ownedKb) {
+      return Response.json({ error: "知识库不存在或无权访问" }, { status: 404 });
+    }
+  }
 
   // Priority: providedSystemPrompt > build from knowledgeBaseId.
   const lastUserMessage = [...messages].reverse().find((m) => m.role === "user");
