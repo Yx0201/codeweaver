@@ -2,8 +2,15 @@
 
 import { revalidatePath } from "next/cache";
 import { prisma } from "@/lib/prisma";
+import { auth } from "@/auth";
 
 export type SearchMode = "hybrid" | "graph" | "fast";
+
+async function requireUserId() {
+  const session = await auth();
+  if (!session?.user?.id) throw new Error("Unauthorized");
+  return session.user.id;
+}
 
 export async function createConversation(
   knowledgeBaseId?: number,
@@ -15,10 +22,12 @@ export async function createConversation(
   created_at: string;
   updated_at: string;
 }> {
+  const userId = await requireUserId();
   const conv = await prisma.conversation.create({
     data: {
       ...(knowledgeBaseId ? { knowledge_base: { connect: { id: knowledgeBaseId } } } : {}),
       search_mode: searchMode,
+      user: { connect: { id: userId } },
     },
   });
   return {
@@ -37,9 +46,10 @@ export async function updateConversationTitleAction(
   const id = formData.get("id") as string;
   const title = (formData.get("title") as string)?.trim();
   if (!id || !title) return { error: "参数无效" };
+  const userId = await requireUserId();
   try {
     await prisma.conversation.update({
-      where: { id },
+      where: { id, user_id: userId },
       data: { title, updated_at: new Date() },
     });
     revalidatePath("/chat");
@@ -55,8 +65,9 @@ export async function deleteConversationAction(
 ): Promise<{ error?: string; success?: boolean }> {
   const id = formData.get("id") as string;
   if (!id) return { error: "参数无效" };
+  const userId = await requireUserId();
   try {
-    await prisma.conversation.delete({ where: { id } });
+    await prisma.conversation.delete({ where: { id, user_id: userId } });
     revalidatePath("/chat");
     return { success: true };
   } catch {

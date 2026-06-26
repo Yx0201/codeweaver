@@ -2,12 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { generateText } from "ai";
 import model from "@/register/model";
 import { prisma } from "@/lib/prisma";
+import { requireUserId, unauthorized } from "@/lib/auth-guard";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
   const { id } = await params;
   const { userMessage } = await req.json();
 
@@ -40,7 +43,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         : "新对话";
 
     await prisma.conversation.update({
-      where: { id },
+      where: { id, user_id: userId },
       data: { title, updated_at: new Date() },
     });
 

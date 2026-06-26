@@ -3,12 +3,15 @@ import type { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/lib/prisma";
 import { uploadKnowledgeFile } from "@/lib/blob";
 import { buildUploadMetadata, createInitialUploadState } from "@/lib/upload-processing";
+import { requireUserId, unauthorized } from "@/lib/auth-guard";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
+  const userId = await requireUserId();
+  if (!userId) return unauthorized();
   const { id } = await params;
   const knowledgeBaseId = parseInt(id);
 
@@ -16,8 +19,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: "无效的知识库ID" }, { status: 400 });
   }
 
-  const kb = await prisma.knowledge_base.findUnique({
-    where: { id: knowledgeBaseId },
+  // findUnique 不支持跨表 user_id 过滤,改 findFirst 校验归属。
+  const kb = await prisma.knowledge_base.findFirst({
+    where: { id: knowledgeBaseId, user_id: userId },
   });
   if (!kb) {
     return NextResponse.json({ error: "知识库不存在" }, { status: 404 });

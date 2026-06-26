@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
 import {
   MessageActions,
   MessageAction,
@@ -24,7 +23,8 @@ import {
 import { MessageResponse } from "@/components/ai-elements/message";
 import { RefreshCcwIcon, CopyIcon, BookOpen, Bot, User } from "lucide-react";
 import { useChat } from "@ai-sdk/react";
-import { Fragment } from "react";
+import type { UIMessage } from "ai";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import {
   Select,
@@ -63,6 +63,338 @@ function LoadingDots() {
     </div>
   );
 }
+
+/**
+ * Time-window throttle for the streaming text. `useDeferredValue` only batches
+ * when tokens arrive faster than a single frame; at typical token rates
+ * (~20–40/sec) it still re-parses markdown once per token, so the bubble
+ * visibly flickers on every chunk. This hook caps re-emits at one per
+ * `intervalMs` via rAF regardless of token rate, and flushes the final value
+ * the instant streaming ends — so the answer catches up exactly on completion.
+ */
+function useThrottledValue<T>(value: T, active: boolean, intervalMs = 50): T {
+  const [snapshot, setSnapshot] = useState(value);
+  // Always-current value ref so the rAF loop reads the latest without re-subscribing.
+  const valueRef = useRef(value);
+  useEffect(() => {
+    valueRef.current = value;
+  }, [value]);
+  const lastFlushRef = useRef(0);
+
+  useEffect(() => {
+    if (!active) {
+      // Not streaming: emit the final value immediately so the completed
+      // answer (and citations, which gate on stream-end) show in full.
+      setSnapshot(valueRef.current);
+      lastFlushRef.current = 0;
+      return;
+    }
+    let raf = 0;
+    const tick = () => {
+      const now = performance.now();
+      if (now - lastFlushRef.current >= intervalMs) {
+        lastFlushRef.current = now;
+        setSnapshot(valueRef.current);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [active, intervalMs]);
+
+  return snapshot;
+}
+
+/**
+ * Renders the streaming markdown from a throttled snapshot so Streamdown only
+ * re-parses a few times per second instead of once per token. `MessageResponse`
+ * is itself `memo`'d, so snapshot ticks where the value hasn't actually changed
+ * bail out for free.
+ */
+function StreamingMessageResponse({
+  text,
+  streaming,
+}: {
+  text: string;
+  streaming: boolean;
+}) {
+  const throttled = useThrottledValue(text, streaming);
+  return (
+    <MessageResponse
+      components={assistantStreamdownComponents}
+      parseIncompleteMarkdown={false}
+    >
+      {throttled}
+    </MessageResponse>
+  );
+}
+
+/**
+ * The Retry/Copy actions, memoized with fully stable props so they do NOT
+ * re-render while the streaming text grows. The Copy button reads the latest
+ * answer text through a ref-backed callback — so even though `textContent`
+ * changes every token, this subtree stays inert during streaming (no icon
+ * flicker from the `transition-all` on Button re-rendering per token).
+ */
+const MessageActionsRow = memo(function MessageActionsRow({
+  onRegenerate,
+  onCopy,
+}: {
+  onRegenerate: () => void;
+  onCopy: () => void;
+}) {
+  return (
+    <MessageActions>
+      <MessageAction onClick={onRegenerate} label="Retry">
+        <RefreshCcwIcon className="size-3" />
+      </MessageAction>
+      <MessageAction onClick={onCopy} label="Copy">
+        <CopyIcon className="size-3" />
+      </MessageAction>
+    </MessageActions>
+  );
+});
+MessageActionsRow.displayName = "MessageActionsRow";
+
+interface MessageRowProps {
+  message: UIMessage;
+  isLastMessage: boolean;
+  isStreamingThisMessage: boolean;
+  onRegenerate: () => void;
+}
+
+/**
+ * A single message row, memoized so completed messages are skipped entirely
+ * when the streaming message updates. The comparator keys on the `message`
+ * reference (AI SDK keeps completed-message identities stable across renders)
+ * plus the two streaming/last flags — when none of those change, the row's
+ * output is identical and React skips reconciliation. All per-message
+ * derivations live inside, guarded by `useMemo` on `message.parts`.
+ */
+const MemoMessageRow = memo(
+  function MessageRow({
+    message,
+    isLastMessage,
+    isStreamingThisMessage,
+    onRegenerate,
+  }: MessageRowProps) {
+    const isAssistant = message.role === "assistant";
+
+    const parts = message.parts as Array<{ type: string; data?: unknown }>;
+
+    const messageMetadata = (
+      message as { metadata?: AssistantMessageMetadata }
+    ).metadata;
+
+    const planPart = useMemo(
+      () =>
+        isAssistant
+          ? (parts.find((p) => p.type === "data-plan")?.data as
+              | ChatDataParts["plan"]
+              | undefined)
+          : undefined,
+      [isAssistant, parts]
+    );
+    const liveTrace = useMemo(
+      () =>
+        isAssistant
+          ? parts
+              .filter((p) => p.type === "data-trace")
+              .map((p) => p.data as TraceStep)
+          : [],
+      [isAssistant, parts]
+    );
+    const liveCitations = useMemo(
+      () =>
+        isAssistant
+          ? (parts
+              .filter((p) => p.type === "data-citations")
+              .at(-1)?.data as MessageReference[] | undefined)
+          : undefined,
+      [isAssistant, parts]
+    );
+    const readySignal = useMemo(
+      () => (isAssistant ? parts.some((p) => p.type === "data-ready") : false),
+      [isAssistant, parts]
+    );
+
+    const references = useMemo(
+      () =>
+        liveCitations ??
+        (isAssistant ? messageMetadata?.references ?? [] : []),
+      [liveCitations, isAssistant, messageMetadata]
+    );
+    const trace = useMemo(
+      () =>
+        liveTrace.length > 0
+          ? liveTrace
+          : isAssistant
+            ? messageMetadata?.trace ?? []
+            : [],
+      [liveTrace, isAssistant, messageMetadata]
+    );
+
+    const agentTrace: AgentTraceStep[] | undefined = isAssistant
+      ? messageMetadata?.agentTrace
+      : undefined;
+    const hasLiveToolParts = useMemo(
+      () =>
+        isAssistant &&
+        parts.some(
+          (p) => typeof p.type === "string" && p.type.startsWith("tool-")
+        ),
+      [isAssistant, parts]
+    );
+    const isAgentMessage =
+      isAssistant &&
+      (!!planPart?.agent ||
+        hasLiveToolParts ||
+        (agentTrace?.length ?? 0) > 0);
+
+    const reasoningText = useMemo(
+      () =>
+        isAssistant
+          ? message.parts
+              .filter(
+                (p): p is { type: "reasoning"; text: string } =>
+                  p.type === "reasoning"
+              )
+              .map((p) => p.text)
+              .join("")
+          : "",
+      [isAssistant, message.parts]
+    );
+    // In Agent mode the model narrates ("先分别检索…") BEFORE/BETWEEN tool
+    // calls and only emits the real answer AFTER the last tool call. Both are
+    // `text` parts, so the answer area must keep only the text that follows the
+    // last tool call — the narration is rendered inline in the thinking-chain
+    // timeline instead. Non-agent messages have no tool parts, so this index is
+    // -1 and every text part counts as the answer.
+    const lastToolIndex = useMemo(() => {
+      let idx = -1;
+      message.parts.forEach((p, i) => {
+        if (typeof p.type === "string" && p.type.startsWith("tool-")) idx = i;
+      });
+      return idx;
+    }, [message.parts]);
+    const textContent = useMemo(
+      () =>
+        message.parts
+          .filter(
+            (p, i): p is { type: "text"; text: string } =>
+              p.type === "text" && i > lastToolIndex
+          )
+          .map((p) => p.text)
+          .join("\n\n"),
+      [message.parts, lastToolIndex]
+    );
+    const renderText = useMemo(
+      () =>
+        references.length > 0
+          ? preprocessCitations(
+              textContent,
+              references.length,
+              message.id
+            )
+          : textContent,
+      [references, textContent, message.id]
+    );
+
+    // Keep the latest answer text in a ref so the Copy action can read it
+    // through a stable (ref-backed) callback. This lets MessageActionsRow stay
+    // memoized with inert props — it never re-renders while text streams in.
+    const textContentRef = useRef(textContent);
+    useEffect(() => {
+      textContentRef.current = textContent;
+    }, [textContent]);
+    const handleCopy = useCallback(() => {
+      navigator.clipboard.writeText(textContentRef.current);
+    }, []);
+
+    const hasThinking =
+      isAgentMessage ||
+      !!planPart?.intro ||
+      trace.length > 0 ||
+      reasoningText.length > 0;
+    const hasAnswer = textContent.trim().length > 0;
+
+    return (
+      <Fragment key={message.id}>
+        <Message from={message.role}>
+          <div
+            className={`w-full flex ${message.role === "user" ? "flex-row-reverse" : ""}`}
+          >
+            {message.role === "user" ? (
+              <div className="flex size-8 items-center justify-center rounded-xl bg-secondary text-secondary-foreground ring-1 ring-border">
+                <User className="size-4" strokeWidth={1.75} />
+              </div>
+            ) : (
+              <div className="flex size-8 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
+                <Bot className="size-4" strokeWidth={1.75} />
+              </div>
+            )}
+          </div>
+          <MessageContent>
+            {isAssistant ? (
+              <div className="w-full">
+                {hasThinking &&
+                  (isAgentMessage ? (
+                    <AgentThinkingChain
+                      intro={planPart?.intro}
+                      parts={
+                        message.parts as Array<Record<string, unknown>>
+                      }
+                      agentTrace={agentTrace}
+                      streaming={isStreamingThisMessage}
+                    />
+                  ) : (
+                    <ThinkingChain
+                      intro={planPart?.intro}
+                      mode={planPart?.mode}
+                      steps={trace}
+                      reasoningText={reasoningText}
+                      streaming={isStreamingThisMessage}
+                      ready={readySignal}
+                    />
+                  ))}
+                {hasAnswer ? (
+                  <div className="pt-1">
+                    <StreamingMessageResponse
+                      text={renderText}
+                      streaming={isStreamingThisMessage}
+                    />
+                  </div>
+                ) : (
+                  isStreamingThisMessage && !hasThinking && <LoadingDots />
+                )}
+                {references.length > 0 && !isStreamingThisMessage && (
+                  <div className="pt-2">
+                    <CitationList
+                      messageId={message.id}
+                      references={references}
+                    />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <MessageResponse>{renderText}</MessageResponse>
+            )}
+          </MessageContent>
+        </Message>
+        {isAssistant && isLastMessage && (
+          <MessageActionsRow onRegenerate={onRegenerate} onCopy={handleCopy} />
+        )}
+      </Fragment>
+    );
+  },
+  (prev, next) =>
+    prev.message === next.message &&
+    prev.isLastMessage === next.isLastMessage &&
+    prev.isStreamingThisMessage === next.isStreamingThisMessage &&
+    prev.onRegenerate === next.onRegenerate
+);
+
+MemoMessageRow.displayName = "MemoMessageRow";
 
 interface KnowledgeBase {
   id: number;
@@ -283,7 +615,9 @@ export function ChatInterface({
     }
   };
 
-  const handleRegenerate = () => {
+  // useCallback keeps the identity stable so MemoMessageRow's memo comparator
+  // (which keys on onRegenerate) doesn't invalidate every row on each render.
+  const handleRegenerate = useCallback(() => {
     regenerate({
       body: {
         conversationId: conversationIdRef.current,
@@ -292,7 +626,7 @@ export function ChatInterface({
         agentMode,
       },
     });
-  };
+  }, [regenerate, kbId, searchMode, agentMode]);
 
   // True while the model is actively producing a response — used to flip the
   // submit button into a stop control and to relax the empty-input disable.
@@ -322,211 +656,20 @@ export function ChatInterface({
     <>
       {messages.map((message, messageIndex) => {
               const isLastMessage = messageIndex === messages.length - 1;
-              const isAssistant = message.role === "assistant";
               // While the answer is still streaming we hold the citation list
               // back, so the body text renders first and the references only
               // appear once the answer is complete.
               const isStreamingThisMessage =
                 isLastMessage &&
                 (status === "submitted" || status === "streaming");
-              // `metadata` persists across reload (initialMessages); the live
-              // thinking chain comes from `data-*` parts during the session.
-              const messageMetadata = (
-                message as { metadata?: AssistantMessageMetadata }
-              ).metadata;
-              // Live data parts (this session) take precedence; on a reload they
-              // are gone, so we fall back to the persisted metadata.
-              const parts = message.parts as Array<{
-                type: string;
-                data?: unknown;
-              }>;
-              const planPart = isAssistant
-                ? (parts.find((p) => p.type === "data-plan")?.data as
-                    | ChatDataParts["plan"]
-                    | undefined)
-                : undefined;
-              const liveTrace = isAssistant
-                ? parts
-                    .filter((p) => p.type === "data-trace")
-                    .map((p) => p.data as TraceStep)
-                : [];
-              const liveCitations = isAssistant
-                ? (parts
-                    .filter((p) => p.type === "data-citations")
-                    .at(-1)?.data as MessageReference[] | undefined)
-                : undefined;
-              const readySignal = isAssistant
-                ? parts.some((p) => p.type === "data-ready")
-                : false;
-
-              const references =
-                liveCitations ??
-                (isAssistant ? messageMetadata?.references ?? [] : []);
-              const trace =
-                liveTrace.length > 0
-                  ? liveTrace
-                  : isAssistant
-                    ? messageMetadata?.trace ?? []
-                    : [];
-              // Agent-mode detection: a `data-plan` with `agent:true` (live),
-              // any `tool-*` part (live), or a persisted `agentTrace` (rehydrated).
-              const agentTrace: AgentTraceStep[] | undefined = isAssistant
-                ? messageMetadata?.agentTrace
-                : undefined;
-              const hasLiveToolParts =
-                isAssistant &&
-                parts.some(
-                  (p) =>
-                    typeof p.type === "string" && p.type.startsWith("tool-")
-                );
-              const isAgentMessage =
-                isAssistant &&
-                (!!planPart?.agent ||
-                  hasLiveToolParts ||
-                  (agentTrace?.length ?? 0) > 0);
-              // Gather reasoning + text up front so the answer renders as a
-              // single unified block in the order thinking → text → citations,
-              // instead of one bubble per part.
-              const reasoningText = isAssistant
-                ? message.parts
-                    .filter(
-                      (p): p is { type: "reasoning"; text: string } =>
-                        p.type === "reasoning"
-                    )
-                    .map((p) => p.text)
-                    .join("")
-                : "";
-              const textContent = message.parts
-                .filter(
-                  (p): p is { type: "text"; text: string } => p.type === "text"
-                )
-                .map((p) => p.text)
-                .join("\n\n");
-              const renderText =
-                references.length > 0
-                  ? preprocessCitations(
-                      textContent,
-                      references.length,
-                      message.id
-                    )
-                  : textContent;
-
               return (
-                <Fragment key={message.id}>
-                  <Message from={message.role}>
-                    <div
-                      className={`w-full flex ${message.role === "user" ? "flex-row-reverse" : ""}`}
-                    >
-                      {message.role === "user" ? (
-                        <div className="flex size-8 items-center justify-center rounded-xl bg-secondary text-secondary-foreground ring-1 ring-border">
-                          <User className="size-4" strokeWidth={1.75} />
-                        </div>
-                      ) : (
-                        <div className="flex size-8 items-center justify-center rounded-xl bg-primary/15 text-primary ring-1 ring-primary/25">
-                          <Bot className="size-4" strokeWidth={1.75} />
-                        </div>
-                      )}
-                    </div>
-                    <MessageContent>
-                      {isAssistant ? (
-                        // Flat, borderless reply: a live thinking chain, then
-                        // the answer, then citations — no card wrapper, so the
-                        // loading state never looks boxed-in.
-                        (() => {
-                          const hasThinking =
-                            isAgentMessage ||
-                            !!planPart?.intro ||
-                            trace.length > 0 ||
-                            reasoningText.length > 0;
-                          const hasAnswer = textContent.trim().length > 0;
-                          return (
-                            <div className="w-full">
-                              {hasThinking &&
-                                (isAgentMessage ? (
-                                  <AgentThinkingChain
-                                    intro={planPart?.intro}
-                                    parts={
-                                      message.parts as Array<
-                                        Record<string, unknown>
-                                      >
-                                    }
-                                    agentTrace={agentTrace}
-                                    streaming={isStreamingThisMessage}
-                                  />
-                                ) : (
-                                  <ThinkingChain
-                                    intro={planPart?.intro}
-                                    mode={planPart?.mode}
-                                    steps={trace}
-                                    reasoningText={reasoningText}
-                                    streaming={isStreamingThisMessage}
-                                    ready={readySignal}
-                                  />
-                                ))}
-                              {hasAnswer ? (
-                                <div className="pt-1">
-                                  <MessageResponse
-                                    components={assistantStreamdownComponents}
-                                    // Disable Streamdown's lenient "incomplete
-                                    // markdown" parsing. During streaming it
-                                    // leaves the last inline link's href
-                                    // undefined (more URL might be coming),
-                                    // which rehype-harden then renders as
-                                    // "[blocked]" — so citation chips like
-                                    // [16][28][7] would show the last one as
-                                    // blocked. Strict parsing renders a
-                                    // half-arrived [7 as literal text and a
-                                    // complete [7] as a chip, never a blocked
-                                    // link. Rehydrated (complete) text was
-                                    // already correct because it parses in one
-                                    // shot.
-                                    parseIncompleteMarkdown={false}
-                                  >
-                                    {renderText}
-                                  </MessageResponse>
-                                </div>
-                              ) : (
-                                // Assistant message exists but nothing has
-                                // arrived yet — one unified bare loader.
-                                isStreamingThisMessage &&
-                                !hasThinking && <LoadingDots />
-                              )}
-                              {references.length > 0 &&
-                                !isStreamingThisMessage && (
-                                  <div className="pt-2">
-                                    <CitationList
-                                      messageId={message.id}
-                                      references={references}
-                                    />
-                                  </div>
-                                )}
-                            </div>
-                          );
-                        })()
-                      ) : (
-                        <MessageResponse>{renderText}</MessageResponse>
-                      )}
-                    </MessageContent>
-                  </Message>
-                  {isAssistant && isLastMessage && (
-                    <MessageActions>
-                      <MessageAction
-                        onClick={handleRegenerate}
-                        label="Retry"
-                      >
-                        <RefreshCcwIcon className="size-3" />
-                      </MessageAction>
-                      <MessageAction
-                        onClick={() =>
-                          navigator.clipboard.writeText(textContent)
-                        }
-                        label="Copy"
-                      >
-                        <CopyIcon className="size-3" />
-                      </MessageAction>
-                    </MessageActions>
-                  )}
-                </Fragment>
+                <MemoMessageRow
+                  key={message.id}
+                  message={message}
+                  isLastMessage={isLastMessage}
+                  isStreamingThisMessage={isStreamingThisMessage}
+                  onRegenerate={handleRegenerate}
+                />
               );
             })}
             {showOptimisticBubble && (
